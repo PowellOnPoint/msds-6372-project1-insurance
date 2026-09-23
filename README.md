@@ -3,7 +3,7 @@
 **MSDS 6372 — Applied Statistics: Inference and Modeling**  
 **Southern Methodist University** · Jacob Turner · Fall 2026
 
-Private group repository for Project 1 using `data/insurance.csv`. Methods stay inside the course stack: MLR, transformations, interactions, residual diagnostics, and `caret` nonparametric models (kNN / tree / random forest).
+Private group repository for Project 1 using `data/insurance.csv`. Course stack only: SLR/MLR, transformations, interactions, residual diagnostics, glmnet, kNN, and `caret` trees/forests.
 
 ## Table of Contents
 - [Project Overview](#project-overview)
@@ -16,35 +16,45 @@ Private group repository for Project 1 using `data/insurance.csv`. Methods stay 
 
 An insurance provider wants to know whether customer information is associated with health-account **charges**, and whether those associations **depend on region**.
 
-- **Objective 1 (interpretability).** Fit an MLR that can be explained: coefficients, confidence intervals, residual diagnostics. At least one formal coefficient interpretation with a CI.
-- **Objective 2 (prediction).** Keep the Objective 1 MLR. Add a more complex MLR and a nonparametric model. Compare with an appropriate CV error metric and recommend one model for predicting future charges.
+- **Objective 1 — interpret.** SLR first (one predictor, one formal coefficient + CI), then an MLR that answers both prompt questions: are customer variables associated with charges, and do those associations depend on region? Include why variables were kept/dropped, a coefficient table, residual diagnostics, and at least one interpreted CI.
+- **Objective 2 — predict.** Keep the Objective 1 MLR as the baseline. Compare it to other course methods (at minimum: one **more complex MLR** and one **nonparametric** model — kNN, tree, or RF via `caret`). Extra comparators (log-MLR, glmnet, a second kNN/\(k\)) are allowed. One CV error table on the **dollar** scale and a recommendation.
 
-Due **9 February**. Deliverables: 20-minute presentation, slides, R notebook, Canvas peer review (not in this repo).
+Due **9 February**. One person submits: slides, 20-minute recording, R notebook. Peer review is a separate Canvas assignment.
+
+**Suggested split:** one person owns Objective 1 (SLR → MLR → diagnostics → CIs); the other owns Objective 2 (extra models → CV table → recommendation). Shared: EDA (done), slides, talk. Put names in the Owner column.
 
 ## Project Status
 
-| Step | Pipeline Stage | Status | Notes / Next Steps |
-|------|----------------|--------|--------------------|
-| 1 | **Data Understanding & Loading** | ✅ Complete | `insurance.csv` (\(n=1338\), 7 columns) loaded; codebook reviewed |
-| 2 | **Data Cleaning & Preprocessing** | ✅ Complete | No missing values; factors recoded with explicit levels in the EDA notebook |
-| 3 | **Exploratory Data Analysis (EDA)** | ✅ Complete | First commit: `EDA/Project1_Insurance_EDA.Rmd` (knitted HTML). See notes below |
-| 4 | **Objective 1 — Interpretable MLR** | ⬜ Not started | `charges ~ age + bmi * smoker + children + region` (add `smoker * region` if the region question needs a coefficient) |
-| 5 | **Model Diagnostics & Assumptions** | ⬜ Not started | Residuals on `charges` and `log(charges)`; influence |
-| 6 | **Objective 2 — Complex MLR** | ⬜ Not started | Interactions / polynomials beyond the interpretability model |
-| 7 | **Objective 2 — Nonparametric Model** | ⬜ Not started | `caret` kNN, regression tree, or random forest |
-| 8 | **Model Comparison & Recommendation** | ⬜ Not started | 10-fold CV RMSE on the **dollar** scale |
-| 9 | **Presentation, Slides & Documentation** | ⬜ Not started | 20-minute talk; peer review is a Canvas assignment |
+| Step | Stage | Status | Owner | Done when |
+|------|-------|--------|-------|-----------|
+| 1 | **Load & codebook** | ✅ Complete | both | `insurance.csv` (\(n=1338\), 7 columns) in `data/`; variable table in the EDA |
+| 2 | **Clean** | ✅ Complete | both | No missingness; factors have explicit levels. Stop cleaning here |
+| 3 | **EDA** | ✅ Complete | both | 4–6 response-vs-predictor plots; **two interaction plots**. First commit; notes below |
+| 4 | **Obj 1 — SLR** | ⬜ Not started | | Fit `charges ~ smoker` (or `~ bmi`). Interpret slope/mean gap **and** a 95% CI |
+| 5 | **Obj 1 — MLR** | ⬜ Not started | | Interpretable MLR that includes **region** (main effect and/or `smoker * region`) and `bmi * smoker`. Write include/exclude |
+| 6 | **Obj 1 — diagnostics** | ⬜ Not started | | Residual plots, outliers/influence, constant variance. Try `log(charges)` only if the raw-scale MLR fails assumptions |
+| 7 | **Obj 1 — answer the prompt** | ⬜ Not started | | Coefficient table + at least one formal CI that addresses *association* and *does it depend on region?* |
+| 8 | **Obj 2 — complex MLR** | ⬜ Not started | | Prompt-required second MLR: extra interactions, polynomials, or log-\(y\). Not for interpretation |
+| 9 | **Obj 2 — nonparametric** | ⬜ Not started | | Prompt-required `caret` kNN **or** tree **or** RF |
+| 10 | **Obj 2 — extra course models** | ⬜ Optional | | glmnet, a second \(k\), bagged tree, etc. Same CV protocol as 8–9 |
+| 11 | **Obj 2 — comparison table** | ⬜ Not started | | One table: Obj 1 MLR vs complex MLR vs nonparametric (+ extras). 10-fold CV RMSE in **dollars**. Recommend one model for future charges |
+| 12 | **Final remarks** | ⬜ Not started | both | Scope of inference (four US regions, not a national sample); limits; if we had more time |
+| 13 | **Slides + 20-min talk** | ⬜ Not started | both | Intro 10 / EDA 20 / Obj 1 20 / Obj 2 20 / close 10. Both present. Isolate output; do not let plots talk |
+| 14 | **Knit notebook + appendix** | ⬜ Not started | both | HTML matches slides; extra tables in appendix or Rmd |
+| 15 | **Peer review (Canvas)** | ⬜ Not started | each | Individual; not in this repo |
+
+Prompt floor for Objective 2 is **three** models in the table (Obj 1 MLR, complex MLR, one nonparametric). Extra models are fine; skipping the complex MLR or the nonparametric is not.
 
 ### EDA already in the first commit
 
-The insurance file is clean (\(n=1338\), no missing). Plots that have to survive into the talk:
+The file is clean (\(n=1338\), no missing). Plots that have to survive into the talk:
 
-- **Smoker** is the dominant main effect (mean charges about \$32,050 vs \$8,434)
-- **BMI × smoker** — \(r=0.81\) for smokers, \(r=0.08\) for non-smokers (put this interaction in Objective 1, not only in the complex MLR)
-- **Region × smoker** — the Objective 1 question; Southeast smokers are the highest on average; region is mostly a level shift
-- Age has a positive slope in both smoker groups; `log(charges)` is nearly symmetric for later residual work
+- **Smoker** is the dominant main effect (mean charges about \$32,050 vs \$8,434) — natural SLR for step 4
+- **BMI × smoker** — \(r=0.81\) for smokers, \(r=0.08\) for non-smokers. Put this in the Objective 1 MLR, not only in Objective 2
+- **Region × smoker** — the “depend on region?” question; Southeast smokers highest; region is mostly a level shift
+- Age slopes in both smoker groups; `log(charges)` is nearly symmetric if diagnostics force a transform
 
-Next: Objective 1 MLR with `bmi * smoker` (and region), not more EDA.
+Next: step 4 (SLR), then step 5 (MLR). Not more EDA.
 
 ## Repository Structure
 
