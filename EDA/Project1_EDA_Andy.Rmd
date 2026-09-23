@@ -1,0 +1,283 @@
+---
+title: "6372_Project_1"
+author: "Bui, Andy"
+date: "2026-09-22"
+output: html_document
+---
+
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r Init, echo=FALSE}
+setwd("C:/Users/bboym/OneDrive/Documents/SMU_School/DS_6372/Project 1")
+insurance<-read.csv("insurance.csv")
+head(insurance)
+str(insurance)
+dim(insurance)
+summary(insurance)
+insurance$sex <- as.factor(insurance$sex)
+insurance$smoker <- as.factor(insurance$smoker)
+insurance$region <- as.factor(insurance$region)
+summary(insurance)
+colSums(is.na(insurance))
+sum(duplicated(insurance))
+insurance[duplicated(insurance), ]
+```
+##Variables
+Variables   Type            Meaning\
+ages        Numeric         Age\   
+sex         Catergorical    Male/Female\
+bmi         Numeric         Body Mass Index\
+children    Numeric         Number of children\
+smoker      Categorical     Yes/No\
+region      Categorical     US region\
+charges     Numeric         Response\
+
+
+
+```{r EDA_histogram, echo=FALSE}
+library(ggplot2)
+#Plotting histogram of Charges
+ggplot(insurance, aes(x = charges)) +
+  geom_histogram(bins = 30) +
+  labs(
+    title = "Distribution of Insurance Charges",
+    x = "Charges",
+    y = "Count"
+  ) +
+  theme_minimal()
+
+#SD and Means
+library(dplyr)
+insurance %>%
+  summarise(
+    mean_age = mean(age),
+    sd_age = sd(age),
+    mean_bmi = mean(bmi),
+    sd_bmi = sd(bmi),
+    mean_children = mean(children),
+    sd_children = sd(children),
+    mean_charges = mean(charges),
+    sd_charges = sd(charges)
+  )
+```
+
+
+
+
+```{r EDA_AVC, echo=FALSE}
+#Age VS Charges
+ggplot(insurance, aes(x = age, y = charges)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(
+    title = "Insurance Charges vs Age",
+    x = "Age",
+    y = "Charges",
+  ) +
+  theme_minimal()
+```
+
+
+Positive relationship. Older customers tend to have higher chargers. Seem to be three different bands of chargers
+
+
+```{r EDA_ASMVC, echo=FALSE}
+#Age VS Charges
+ggplot(insurance, aes(x = age, y = charges, color= smoker)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(
+    title = "Insurance Charges vs Age",
+    x = "Age",
+    y = "Charges",
+    color= "Smokers"
+  ) +
+  theme_minimal()
+```
+
+
+Smokers make up most of the 2 upper bands. Non smokers make up the lower band. Both slopes seem to be similar though
+
+```{r EDA_BVC, echo=FALSE}
+#BMI VS Charges
+ggplot(insurance, aes(x = bmi, y = charges)) +
+  geom_point(alpha = 0.6) +
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(
+    title = "BMI and Insurance Charges by Smoking Status",
+    x = "BMI",
+    y = "Charges"
+  ) +
+  theme_minimal()
+
+```
+
+Another positive relationship as BMI increase charges increase. 
+
+```{r EDA_BSMVC, echo=FALSE}
+#BMIxSMoker VS Charges
+ggplot(insurance, aes(x = bmi, y = charges, color = smoker)) +
+  geom_point(alpha = 0.6) +
+  geom_smooth(method = "lm", se = FALSE) +
+  labs(
+    title = "BMI and Insurance Charges by Smoking Status",
+    x = "BMI",
+    y = "Charges",
+    color = "Smoker"
+  ) +
+  theme_minimal()
+
+```
+Separating the data we can see that there are 2 different slopes when it comes to BMI. One for smoke and one a smaller one for non
+
+
+
+```{r EDA_SMVC, echo=FALSE}
+#Smoker VS Charges
+ggplot(insurance, aes(x = smoker, y = charges)) +
+  geom_boxplot() +
+  labs(
+    title = "Insurance Charges by Smoking Status",
+    x = "Smoker",
+    y = "Charges"
+  ) +
+  theme_minimal()
+
+```
+
+Smokers appear to have strong association with higher chargers while non smokers have an association with lower chargers. With this plot and the previous BMI plot, smoking is something we will want to look into for our model.
+
+```{r EDA_SVC, echo=FALSE}
+#Sex VS Charges
+ggplot(insurance, aes(x = sex, y = charges)) +
+  geom_boxplot() +
+  labs(
+    title = "Insurance Charges by Sex",
+    x = "Sex",
+    y = "Charges"
+  ) +
+  theme_minimal()
+
+```
+
+The median is practically identical for female and male. The spread of charges is slightly greater for males
+
+
+
+```{r EDA_RVC, echo=FALSE}
+#Region VS Charges
+ggplot(insurance, aes(x = region, y = charges)) +
+  geom_boxplot() +
+  labs(
+    title = "Insurance Charges by Region",
+    x = "Region",
+    y = "Charges"
+  ) +
+  theme_minimal()
+
+```
+Insurance charges appear fairly similar across regions in terms of median values.  The southeast shows greater variability and somewhat higher charges in the upper portion of the distribution
+
+```{r EDA_RAVC, echo=FALSE}
+#RegionXAges VS Charges
+ggplot(insurance, aes(
+  x = age,
+  y = charges,
+  color = region
+)) +
+  geom_point(alpha = 0.3) +
+  geom_smooth(
+    method = "lm",
+    se = FALSE
+  ) +
+  labs(
+    title = "Relationship Between Age and Charges by Region",
+    x = "Age",
+    y = "Charges",
+    color = "Region"
+  ) +
+  theme_minimal()
+
+```
+There is a positive association between age and charges across all regions. Similar slopes suggest little evidence that the age and charges relationship changes by region The fitted regression lines are relatively parallel, suggesting that the relationship between age and charges is fairly consistent across regions
+
+
+```{r EDA_RBVC, echo=FALSE}
+#RegionXBMI VS Charges
+ggplot(insurance, aes(
+  x = bmi,
+  y = charges,
+  color = region
+)) +
+  geom_point(alpha = 0.3) +
+  geom_smooth(
+    method = "lm",
+    se = FALSE
+  ) +
+  labs(
+    title = "Relationship Between BMI and Charges by Region",
+    x = "BMI",
+    y = "Charges",
+    color = "Region"
+  ) +
+  theme_minimal()
+
+```
+
+Similar to what is seen above. Similar slopes suggest little evidence that the BMI and charges relationship changes by region
+
+```{r EDA_RSMVC, echo=FALSE}
+#RegionXSmoker VS Charges
+ggplot(
+  insurance,
+  aes(
+    x = region,
+    y = charges,
+    color = smoker,
+    group = smoker
+  )
+) +
+  stat_summary(
+    fun = mean,
+    geom = "point",
+    size = 3
+  ) +
+  stat_summary(
+    fun = mean,
+    geom = "line"
+  ) +
+  labs(
+    title = "Mean Charges by Smoking Status and Region",
+    x = "Region",
+    y = "Mean Charges",
+    color = "Smoker"
+  ) +
+  theme_minimal()
+
+```
+Non smokers mean charges are roughly similar across regions, while for smokers, mean charges vary much more by region, especially in the southeast, where the mean is noticeably higher, suggesting a possible interaction between smoking status and region.
+
+
+```{r EDA_CHVC, echo=FALSE}
+#Children VS Charges
+ggplot(insurance, aes(
+  x = factor(children),
+  y = charges
+)) +
+  geom_boxplot() +
+  labs(
+    title = "Insurance Charges by Number of Children",
+    x = "Number of Children",
+    y = "Charges"
+  ) +
+  theme_minimal()
+
+```
+
+Insurance charges do not appear to change substantially with the number of children. Although customers with 3 or 4 children show slightly higher median charges, there is no clear trend across the groups.
