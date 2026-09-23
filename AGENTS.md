@@ -22,6 +22,7 @@ data/insurance.csv
 docs/MSDS 6372 Project 1 Description 2026.docx
 EDA/Project1_Insurance_EDA.Rmd
 EDA/Project1_Insurance_EDA.html
+Objective_1.R
 ```
 
 - Knit with **rmarkdown** (`output: html_document`), not Quarto. TOC, `df_print: kable`, `code_folding: hide`.
@@ -42,7 +43,7 @@ Packages already in the EDA: `ggplot2`, `dplyr`, `tidyr`, `GGally`, `naniar`, `g
 
 ## How to change things
 
-- Prefer editing existing `.Rmd` files over new notebooks until Obj 1/2 need their own files (`Obj1/`, `Obj2/`, or `analysis/`).
+- Prefer editing existing `.Rmd` files over new notebooks. `Objective_1.R` is an exploratory script; the submitted analysis should still be a knitted `.Rmd`. Drop the duplicate in every modeling script, not only the EDA.
 - Drop the duplicate in code, not by rewriting the CSV.
 - Formal coefficient interpretations: units, direction, CI, and the ceteris-paribus clause. Interaction means the smoker gap is **not** one number.
 - If `charges` residuals fail, try `log(charges)` for diagnostics; still report Obj 2 RMSE in **dollars**.
