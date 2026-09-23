@@ -45,7 +45,7 @@ Due **9 February**. One person submits: slides, 20-minute recording, R notebook.
 
 Prompt floor for Objective 2 is **three** models in the table (Obj 1 MLR, complex MLR, one nonparametric). Extra models are fine; skipping the complex MLR or the nonparametric is not.
 
-### EDA already in the first commit
+### EDA
 
 The file is clean (\(n=1338\), no missing). Plots:
 
@@ -89,5 +89,5 @@ To add the second GitHub user as a collaborator, send Aaron the GitHub username.
 
 ## Acknowledgments
 - Course instructors: Dr. Turner
-- Dataset: MSRP of Automobiles
+- Dataset: Insurance Charges
 - Special thanks to the SMU MSDS program for the rigorous statistical applications provided in MSDS 6372.
