@@ -77,7 +77,7 @@ Knit working directory is the **document** folder (`EDA/`). Data is read as `../
 
 1. Open `6372-Project1-Insurance.Rproj` in RStudio.
 2. Knit `EDA/Project1_Insurance_EDA.Rmd` (packages: `ggplot2`, `dplyr`, `tidyr`, `GGally`, `naniar`, `gridExtra`).
-3. Branch for a slice of work (`eda`, `obj1-mlr`, `obj2-caret`, `slides`).
+3. Branch for a slice of work (`obj1-slr-mlr`, `obj2-compare`, `slides`).
 4. Knit the `.Rmd` before you push so the HTML matches.
 5. Do not commit `.RData`, Office lockfiles (`~$*`), or knitted `*_files/` folders.
 
