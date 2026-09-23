@@ -1,0 +1,235 @@
+---
+title: "Project 1 EDA: Insurance Charges"
+subtitle: "MSDS 6372: Jacob Turner"
+author: "Aaron Powell"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    df_print: kable
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width = 7,
+  fig.height = 4.5
+)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(GGally)
+library(naniar)
+library(gridExtra)
+theme_set(theme_bw())
+```
+
+```{r helpers, include=FALSE}
+summ_num <- function(df) {
+  df %>%
+    select(where(is.numeric)) %>%
+    pivot_longer(everything()) %>%
+    group_by(name) %>%
+    summarise(
+      n = sum(!is.na(value)),
+      n_miss = sum(is.na(value)),
+      mean = mean(value, na.rm = TRUE),
+      sd = sd(value, na.rm = TRUE),
+      min = min(value, na.rm = TRUE),
+      q25 = quantile(value, 0.25, na.rm = TRUE),
+      median = median(value, na.rm = TRUE),
+      q75 = quantile(value, 0.75, na.rm = TRUE),
+      max = max(value, na.rm = TRUE),
+      .groups = "drop"
+    )
+}
+```
+
+## Introduction and objectives
+
+An insurance provider wants to know whether customer information is associated with the amount charged to health accounts, and **whether those associations depend on the customer's region**. That is Objective 1: an interpretable MLR with coefficients, confidence intervals, and residual diagnostics.
+
+Objective 2 is prediction. Keep the Objective 1 model, add a more complex MLR, add a nonparametric method (`caret` kNN, tree, or random forest), and compare out-of-sample error.
+
+This notebook is **EDA only**. Rubric requirements covered here: variable table, summary statistics, 4–6 response-vs-predictor graphics, and at least two interaction plots. No fitted Objective 1/2 models yet.
+
+```{r load}
+ins_raw <- read.csv("../data/insurance.csv", stringsAsFactors = TRUE)
+
+ins <- ins_raw %>%
+  mutate(
+    smoker = factor(smoker, levels = c("no", "yes")),
+    region = factor(region, levels = c("northeast", "northwest", "southeast", "southwest")),
+    sex = factor(sex, levels = c("female", "male")),
+    children_f = factor(children)
+  )
+
+n_miss <- sum(is.na(ins_raw))
+n <- nrow(ins)
+```
+
+**Answer.** \(n = `r n`\) customers, `r ncol(ins_raw)` columns, `r n_miss` missing cells. No row-dropping or imputation is required to start modeling.
+
+## Data description
+
+| Variable | Type | Role | Description |
+|---|---|---|---|
+| `age` | numeric | predictor | Customer age in years (18–64) |
+| `sex` | factor | predictor | `female` / `male` |
+| `bmi` | numeric | predictor | Body mass index |
+| `children` | integer | predictor | Number of children (0–5) |
+| `smoker` | factor | predictor | `yes` / `no` |
+| `region` | factor | predictor | `northeast`, `northwest`, `southeast`, `southwest` |
+| `charges` | numeric | **response** | Total charges on the customer's health account |
+
+Processing: factors recoded with explicit levels so plots and later dummy coding are stable. `children` is kept numeric for a linear term and copied as `children_f` for boxplots. No other cleaning.
+
+```{r missing}
+vis_miss(ins_raw)
+summ_num(ins %>% select(age, bmi, children, charges))
+```
+
+```{r counts}
+table(ins$sex)
+table(ins$smoker)
+table(ins$region)
+table(ins$children)
+table(ins$smoker, ins$region)
+table(ins$sex, ins$smoker)
+```
+
+**Answer.** Sex and region are balanced. Smokers are 274 / 1338 (20.5%). Smoker-by-region cells are 58–91, large enough for an interaction. Children = 4 or 5 is rare (25 and 18). Mean charges \$13,270 vs median \$9,382 — right skew.
+
+## Exploratory plots
+
+### 1–2. Response shape and the smoker split
+
+```{r charges-hist, fig.height=4.2}
+p1 <- ggplot(ins, aes(x = charges)) +
+  geom_histogram(bins = 30, fill = "grey70", color = "white") +
+  labs(title = "Charges are right-skewed", x = "Charges ($)", y = "Customers")
+p2 <- ggplot(ins, aes(x = log(charges))) +
+  geom_histogram(bins = 30, fill = "grey70", color = "white") +
+  labs(title = "log(charges) is nearly symmetric", x = "log(charges)", y = "Customers")
+grid.arrange(p1, p2, ncol = 2)
+```
+
+```{r smoker-box}
+ggplot(ins, aes(x = smoker, y = charges, fill = smoker)) +
+  geom_boxplot() +
+  guides(fill = "none") +
+  labs(title = "Smoker is the dominant main effect",
+       x = "Smoker", y = "Charges ($)")
+```
+
+```{r smoker-means}
+ins %>%
+  group_by(smoker) %>%
+  summarise(
+    n = n(),
+    mean = mean(charges),
+    median = median(charges),
+    sd = sd(charges),
+    .groups = "drop"
+  )
+```
+
+**Answer.** Mean charges are about \$32,050 for smokers vs \$8,434 for non-smokers. Skew of `charges` is 1.52; log skew is \(-0.09\). For Objective 1, a log response may stabilize residuals; for Objective 2, report CV RMSE in **dollars** if the client thinks in dollars.
+
+### 3. Age vs charges (interaction look: age \(\times\) smoker)
+
+```{r age}
+ggplot(ins, aes(x = age, y = charges, color = smoker)) +
+  geom_point(alpha = 0.4) +
+  geom_smooth(method = "lm", se = FALSE, formula = y ~ x) +
+  labs(title = "Age vs charges by smoker", x = "Age", y = "Charges ($)")
+```
+
+```{r age-cor}
+ins %>%
+  group_by(smoker) %>%
+  summarise(r_age_charges = cor(age, charges), .groups = "drop")
+```
+
+**Answer.** Age has a steady positive slope in both groups. The correlation is stronger among non-smokers (\(r = 0.63\) vs \(0.37\)). Smoker is a level shift of tens of thousands of dollars; age is a smaller, roughly parallel slope. Still worth `age * smoker` in the complex MLR.
+
+### 4. Interaction: BMI \(\times\) smoker
+
+```{r bmi-smoker}
+ggplot(ins, aes(x = bmi, y = charges, color = smoker)) +
+  geom_point(alpha = 0.45) +
+  geom_smooth(method = "lm", se = FALSE, formula = y ~ x) +
+  labs(title = "BMI vs charges depends on smoker",
+       x = "BMI", y = "Charges ($)")
+```
+
+```{r bmi-cor}
+ins %>%
+  group_by(smoker) %>%
+  summarise(r_bmi_charges = cor(bmi, charges), .groups = "drop")
+```
+
+**Answer.** Among smokers, BMI and charges correlate \(r = 0.81\). Among non-smokers, \(r = 0.08\). This is the strongest interaction in the file. A main-effects-only MLR averages a real slope into something that is true for neither group. Put `bmi * smoker` in the Objective 1 model, not only in the “complex” model.
+
+### 5. Interaction: does it depend on region? (Objective 1)
+
+```{r region-facet, fig.height=6}
+ggplot(ins, aes(x = bmi, y = charges, color = smoker)) +
+  geom_point(alpha = 0.4, size = 0.8) +
+  geom_smooth(method = "lm", se = FALSE, formula = y ~ x) +
+  facet_wrap(~region) +
+  labs(title = "BMI vs charges by smoker, faceted by region",
+       x = "BMI", y = "Charges ($)")
+```
+
+```{r region-means}
+ins %>%
+  group_by(region, smoker) %>%
+  summarise(n = n(), mean_charges = mean(charges), .groups = "drop") %>%
+  arrange(smoker, region)
+```
+
+```{r region-box, fig.height=4.2}
+p3 <- ggplot(ins, aes(x = region, y = charges, fill = smoker)) +
+  geom_boxplot(outlier.size = 0.6) +
+  labs(title = "Charges by region and smoker", x = "Region", y = "Charges ($)") +
+  theme(axis.text.x = element_text(angle = 20, hjust = 1))
+p4 <- ggplot(ins, aes(x = sex, y = charges, fill = smoker)) +
+  geom_boxplot(outlier.size = 0.6) +
+  labs(title = "Charges by sex and smoker", x = "Sex", y = "Charges ($)")
+grid.arrange(p3, p4, ncol = 2)
+```
+
+**Answer.** The smoker \(\times\) BMI wedge appears in every region. Region is mostly a **level shift**: Southeast smokers average about \$34,845 vs about \$30k in the Northeast and Northwest. Sex is small once smoker is in the picture. Objective 1 can be answered with `charges ~ age + bmi * smoker + children + region` and a `smoker * region` term if we want the prompt’s “depend on region” question in a coefficient rather than only in this plot. A three-way `bmi * smoker * region` is possible (cells 58–91) but will eat degrees of freedom; try it in Objective 2, not as the interpretability model.
+
+### 6. Children and the numeric overview
+
+```{r children}
+ggplot(ins, aes(x = children_f, y = charges, fill = smoker)) +
+  geom_boxplot() +
+  labs(title = "Charges by number of children and smoker",
+       x = "Children", y = "Charges ($)")
+```
+
+```{r ggpairs, fig.height=7}
+ggpairs(
+  ins %>% select(charges, age, bmi, children, smoker),
+  mapping = aes(colour = smoker, alpha = 0.35),
+  progress = FALSE
+)
+```
+
+**Answer.** Children is a weak main effect (overall \(r = 0.07\) with charges). The `ggpairs` panel is the same story in one figure: smoker separates two clouds; BMI only slopes in the smoker cloud; age slopes in both.
+
+## Implications for the two objectives
+
+**Objective 1 (interpret).** Lead with smoker and `bmi * smoker`. Report a CI for the smoker contrast at a fixed BMI (the interaction means the smoker gap is not a single number). Then region: either a main-effect shift or `smoker * region`. Age and children are adjustment variables. Check residuals on both `charges` and `log(charges)`. Scope of inference: these are 1,338 customers in four US regions, not a random national sample.
+
+**Objective 2 (predict).** A main-effects MLR will lose to anything that includes `bmi * smoker`. The complex MLR should add that interaction (and maybe `age * smoker` or a BMI polynomial for smokers). kNN / tree / RF should beat the main-effects MLR; they may **not** beat an MLR that already has the interaction. Compare models with 10-fold CV RMSE on the dollar scale.
+
+**Next.** Fit the Objective 1 MLR. Stop expanding EDA unless a residual plot forces a new transformation.

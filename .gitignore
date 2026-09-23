@@ -1,0 +1,16 @@
+.DS_Store
+**/.DS_Store
+._*
+~$*
+.Rproj.user/
+.Rhistory
+.RData
+.Ruserdata
+*.Rapp.history
+*_cache/
+.quarto/
+EDA/*_files/
+*.tmp
+*.swp
+.env
+.env.*
