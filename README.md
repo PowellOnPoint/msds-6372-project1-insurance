@@ -47,10 +47,10 @@ Prompt floor for Objective 2 is **three** models in the table (Obj 1 MLR, comple
 
 ### EDA already in the first commit
 
-The file is clean (\(n=1338\), no missing). Plots that have to survive into the talk:
+The file is clean (\(n=1338\), no missing). Plots:
 
 - **Smoker** is the dominant main effect (mean charges about \$32,050 vs \$8,434) — natural SLR for step 4
-- **BMI × smoker** — \(r=0.81\) for smokers, \(r=0.08\) for non-smokers. Put this in the Objective 1 MLR, not only in Objective 2
+- **BMI × smoker** — \(r=0.81\) for smokers, \(r=0.08\) for non-smokers. Objective 1 MLR, not only Objective 2
 - **Region × smoker** — the “depend on region?” question; Southeast smokers highest; region is mostly a level shift
 - Age slopes in both smoker groups; `log(charges)` is nearly symmetric if diagnostics force a transform
 
@@ -84,6 +84,10 @@ Knit working directory is the **document** folder (`EDA/`). Data is read as `../
 To add the second GitHub user as a collaborator, send Aaron the GitHub username. The repo is **private**.
 
 ## Authors
+- Aaron Powell – MSDS Candidate, Southern Methodist University  
+- Thuan-Andy Bui – MSDS Candidate, Southern Methodist University  
 
-- Aaron Powell
-- *(collaborator — GitHub username TBD)*
+## Acknowledgments
+- Course instructors: Dr. Turner
+- Dataset: MSRP of Automobiles
+- Special thanks to the SMU MSDS program for the rigorous statistical applications provided in MSDS 6372.
