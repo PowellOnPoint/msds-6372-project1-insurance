@@ -57,7 +57,14 @@ This notebook is EDA only. Rubric requirements covered here: variable table, sum
 ```{r load}
 ins_raw <- read.csv("../data/insurance.csv", stringsAsFactors = TRUE)
 
+n_miss <- sum(is.na(ins_raw))
+n_raw <- nrow(ins_raw)
+dup_rows <- ins_raw %>%
+  filter(duplicated(.) | duplicated(., fromLast = TRUE))
+dup_rows
+
 ins <- ins_raw %>%
+  distinct() %>%
   mutate(
     smoker = factor(smoker, levels = c("no", "yes")),
     region = factor(region, levels = c("northeast", "northwest", "southeast", "southwest")),
@@ -65,11 +72,11 @@ ins <- ins_raw %>%
     children_f = factor(children)
   )
 
-n_miss <- sum(is.na(ins_raw))
 n <- nrow(ins)
+n_dropped <- n_raw - n
 ```
 
-\(n = `r n`\) customers, `r ncol(ins_raw)` columns, `r n_miss` missing cells. No row-dropping or imputation is required to start modeling.
+Raw file: \(n = `r n_raw`\) rows, `r ncol(ins_raw)` columns, `r n_miss` missing cells. One exact duplicate pair (19-year-old male, northwest, non-smoker, `charges = 1639.56`). Drop the extra copy with `distinct()`. Analysis file: \(n = `r n`\) (`r n_dropped` row removed). No imputation.
 
 ## Data description
 
@@ -83,7 +90,7 @@ n <- nrow(ins)
 | `region` | factor | predictor | `northeast`, `northwest`, `southeast`, `southwest` |
 | `charges` | numeric | **response** | Total charges on the customer's health account |
 
-Processing: factors recoded with explicit levels so plots and later dummy coding are stable. `children` is kept numeric for a linear term and copied as `children_f` for boxplots. No other cleaning.
+Processing: drop the one exact duplicate row; recode factors with explicit levels so plots and later dummy coding are stable. `children` is kept numeric for a linear term and copied as `children_f` for boxplots. No other cleaning. The delivered CSV is left as-is; the drop happens in this notebook.
 
 ```{r missing}
 vis_miss(ins_raw)
@@ -99,7 +106,7 @@ table(ins$smoker, ins$region)
 table(ins$sex, ins$smoker)
 ```
 
-Sex and region are balanced. Smokers are 274 / 1338 (20.5%). Smoker-by-region cells are 58–91, large enough for an interaction. Children = 4 or 5 is rare (25 and 18). Mean charges \$13,270 vs median \$9,382 — right skew.
+Sex and region are balanced. Smokers are 274 / `r n` (20.5%). Smoker-by-region cells are 58–91, large enough for an interaction. Children = 4 or 5 is rare (25 and 18). Mean charges about \$13,270 vs median \$9,382 — right skew. The dropped duplicate was a non-smoker; smoker counts are unchanged.
 
 ## Exploratory plots
 
@@ -224,7 +231,7 @@ Children is a weak main effect (overall \(r = 0.07\) with charges). The `ggpairs
 
 ## Implications for the two objectives
 
-**Objective 1 (interpret).** Lead with smoker and `bmi * smoker`. Report a CI for the smoker contrast at a fixed BMI (the interaction means the smoker gap is not a single number). Then region: either a main-effect shift or `smoker * region`. Age and children are adjustment variables. Check residuals on both `charges` and `log(charges)`. Scope of inference: these are 1,338 customers in four US regions, not a random national sample.
+**Objective 1 (interpret).** Lead with smoker and `bmi * smoker`. Report a CI for the smoker contrast at a fixed BMI (the interaction means the smoker gap is not a single number). Then region: either a main-effect shift or `smoker * region`. Age and children are adjustment variables. Check residuals on both `charges` and `log(charges)`. Scope of inference: these are `r n` unique customers in four US regions, not a random national sample.
 
 **Objective 2 (predict).** A main-effects MLR will lose to anything that includes `bmi * smoker`. The complex MLR should add that interaction (and maybe `age * smoker` or a BMI polynomial for smokers). kNN / tree / RF should beat the main-effects MLR; they may **not** beat an MLR that already has the interaction. Compare models with 10-fold CV RMSE on the dollar scale.
 

@@ -28,7 +28,7 @@ Due **9 February**. One person submits: slides, 20-minute recording, R notebook.
 | Step | Stage | Status | Owner | Done when |
 |------|-------|--------|-------|-----------|
 | 1 | **Load & codebook** | ✅ Complete | both | `insurance.csv` (\(n=1338\), 7 columns) in `data/`; variable table in the EDA |
-| 2 | **Clean** | ✅ Complete | both | No missingness; factors have explicit levels. Stop cleaning here |
+| 2 | **Clean** | ✅ Complete | both | No missingness. One exact duplicate dropped (`distinct()`); \(n=1337\). Factors recoded. Stop cleaning here |
 | 3 | **EDA** | ✅ Complete | both | 4–6 response-vs-predictor plots; **two interaction plots**. First commit; notes below |
 | 4 | **Obj 1 — SLR** | ⬜ Not started | | Fit `charges ~ smoker` (or `~ bmi`). Interpret slope/mean gap **and** a 95% CI |
 | 5 | **Obj 1 — MLR** | ⬜ Not started | | Interpretable MLR that includes **region** (main effect and/or `smoker * region`) and `bmi * smoker`. Write include/exclude |
@@ -47,7 +47,7 @@ Prompt floor for Objective 2 is **three** models in the table (Obj 1 MLR, comple
 
 ### EDA
 
-The file is clean (\(n=1338\), no missing). Plots:
+Raw file \(n=1338\), one exact duplicate dropped (19-year-old northwest male, non-smoker, charges \$1,639.56) → \(n=1337\). No missing. Plots:
 
 - **Smoker** is the dominant main effect (mean charges about \$32,050 vs \$8,434) — natural SLR for step 4
 - **BMI × smoker** — \(r=0.81\) for smokers, \(r=0.08\) for non-smokers. Objective 1 MLR, not only Objective 2
