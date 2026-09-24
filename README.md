@@ -19,29 +19,29 @@ An insurance provider wants to know whether customer information is associated w
 - **Objective 1 — interpret.** SLR first (one predictor, one formal coefficient + CI), then an MLR that answers both prompt questions: are customer variables associated with charges, and do those associations depend on region? Include why variables were kept/dropped, a coefficient table, residual diagnostics, and at least one interpreted CI.
 - **Objective 2 — predict.** Keep the Objective 1 MLR as the baseline. Compare it to other course methods (at minimum: one **more complex MLR** and one **nonparametric** model — kNN, tree, or RF via `caret`). Extra comparators (log-MLR, glmnet, a second kNN/\(k\)) are allowed. One CV error table on the **dollar** scale and a recommendation.
 
-Due **9 February**. One person submits: slides, 20-minute recording, R notebook. Peer review is a separate Canvas assignment.
+Due **Sunday, 27 September 2026**. One person submits: slides, 20-minute recording, R notebook. Peer review is a separate Canvas assignment.
 
-**Suggested split:** one person owns Objective 1 (SLR → MLR → diagnostics → CIs); the other owns Objective 2 (extra models → CV table → recommendation). Shared: EDA (done), slides, talk. Put names in the Owner column.
+**Suggested split:** one person owns Objective 1 (SLR → MLR → diagnostics → CIs); the other owns Objective 2 (extra models → CV table → recommendation). Shared: EDA (done), slides, talk.
 
 ## Project Status
 
-| Step | Stage | Status | Owner | Done when |
-|------|-------|--------|-------|-----------|
-| 1 | **Load & codebook** | ✅ Complete | both | `insurance.csv` (\(n=1338\), 7 columns) in `data/`; variable table in the EDA |
-| 2 | **Clean** | ✅ Complete | both | No missingness. One exact duplicate dropped (`distinct()`); \(n=1337\). Factors recoded. Stop cleaning here |
-| 3 | **EDA** | ✅ Complete | both | 4–6 response-vs-predictor plots; **two interaction plots**. First commit; notes below |
-| 4 | **Obj 1 — simple model** | ✅ Complete | Aaron | `charges ~ bmi * smoker` on the dollar scale. Smoker gap and a 95% CI at BMI 25, 30, and 35. Not a one-predictor `charges ~ smoker` |
-| 5 | **Obj 1 — MLR** | ✅ Complete | Aaron | `charges ~ age + children + bmi * smoker + region`. Include/exclude written. Sex and `smoker * region` not in the reported equation |
-| 6 | **Obj 1 — diagnostics** | 🔄 In progress | Aaron | Residual plots, outliers/influence, constant variance. Raw vs square-root vs log compared; scale choice not closed |
-| 7 | **Obj 1 — answer the prompt** | 🔄 In progress | Aaron | Coefficient table + at least one formal CI that addresses *association* and *does it depend on region?* |
-| 8 | **Obj 2 — complex MLR** | ⬜ Not started | | Prompt-required second MLR: extra interactions, polynomials, or log-\(y\). Not for interpretation |
-| 9 | **Obj 2 — nonparametric** | ⬜ Not started | | Prompt-required `caret` kNN **or** tree **or** RF |
-| 10 | **Obj 2 — extra course models** | ⬜ Optional | | glmnet, a second \(k\), bagged tree, etc. Same CV protocol as 8–9 |
-| 11 | **Obj 2 — comparison table** | ⬜ Not started | | One table: Obj 1 MLR vs complex MLR vs nonparametric (+ extras). 10-fold CV RMSE in **dollars**. Recommend one model for future charges |
-| 12 | **Final remarks** | ⬜ Not started | both | Scope of inference (four US regions, not a national sample); limits; if we had more time |
-| 13 | **Slides + 20-min talk** | ⬜ Not started | both | Intro 10 / EDA 20 / Obj 1 20 / Obj 2 20 / close 10. Both present. Isolate output; do not let plots talk |
-| 14 | **Knit notebook + appendix** | ⬜ Not started | both | HTML matches slides; extra tables in appendix or Rmd |
-| 15 | **Peer review (Canvas)** | ⬜ Not started | each | Individual; not in this repo |
+| Step | Stage | Status | Done when |
+|------|-------|--------|-----------|
+| 1 | **Load & codebook** | ✅ Complete | `insurance.csv` (\(n=1338\), 7 columns) in `data/`; variable table in the EDA |
+| 2 | **Clean** | ✅ Complete | No missingness. One exact duplicate dropped (`distinct()`); \(n=1337\). Factors recoded. Stop cleaning here |
+| 3 | **EDA** | ✅ Complete | 4–6 response-vs-predictor plots; **two interaction plots**. First commit; notes below |
+| 4 | **Obj 1 — simple model** | ✅ Complete | `charges ~ bmi * smoker` on the dollar scale. Smoker gap and a 95% CI at BMI 25, 30, and 35. Not a one-predictor `charges ~ smoker` |
+| 5 | **Obj 1 — MLR** | ✅ Complete | `charges ~ age + children + bmi * smoker + region`. Include/exclude written. Sex and `smoker * region` not in the reported equation |
+| 6 | **Obj 1 — diagnostics** | 🔄 In progress | Residual plots, outliers/influence, constant variance. Raw vs square-root vs log compared; scale choice not closed |
+| 7 | **Obj 1 — answer the prompt** | 🔄 In progress | Coefficient table + at least one formal CI that addresses *association* and *does it depend on region?* |
+| 8 | **Obj 2 — complex MLR** | ✅ Complete | Full linear model is every two-way interaction. Stepwise, both directions, by AIC. No squared BMI term |
+| 9 | **Obj 2 — nonparametric** | ✅ Complete | Scaled `caret` kNN and a `caret` random forest. 10-fold CV beside an 80/20 split, in dollars |
+| 10 | **Obj 2 — extra course models** | ✅ Complete | Lasso (`glmnet`), bagged trees, and bootstrap of the Objective 1 equation. Same folds as steps 8–9 |
+| 11 | **Obj 2 — comparison table** | ✅ Complete | One table: AIC, BIC, adjusted \(R^2\), PRESS where defined, plus 10-fold and 80/20 RMSE in dollars. Random forest is the lowest-error predictor |
+| 12 | **Final remarks** | ⬜ Not started | Scope of inference (four US regions, not a national sample); limits; if we had more time |
+| 13 | **Slides + 20-min talk** | ⬜ Not started | Intro 10 / EDA 20 / Obj 1 20 / Obj 2 20 / close 10. Both present. Isolate output; do not let plots talk |
+| 14 | **Knit notebook + appendix** | ⬜ Not started | HTML matches slides; extra tables in appendix or Rmd |
+| 15 | **Peer review (Canvas)** | ⬜ Not started | Individual; not in this repo |
 
 Prompt floor for Objective 2 is **three** models in the table (Obj 1 MLR, complex MLR, one nonparametric). Extra models are fine; skipping the complex MLR or the nonparametric is not.
 
@@ -54,7 +54,7 @@ Raw file \(n=1338\), one exact duplicate dropped (19-year-old northwest male, no
 - **Region × smoker** — the “depend on region?” question; Southeast smokers highest; region is mostly a level shift
 - Age slopes in both smoker groups; `log(charges)` is nearly symmetric if diagnostics force a transform
 
-Next: finish step 6 (diagnostics) and step 7 (the prompt answer). The Objective 1 notebook is local and is not in this repo yet. Objective 2 has not started. Not more EDA.
+Next: finish step 6 (diagnostics) and step 7 (the prompt answer), then slides and the talk. The Objective 1 notebook is `Objective_1/Project1_Insurance_Objective1.Rmd`. The Objective 2 notebook is `Objective_2/Project1_Insurance_Objective2.Rmd`. Not more EDA.
 
 ## Repository Structure
 
@@ -67,19 +67,26 @@ Next: finish step 6 (diagnostics) and step 7 (the prompt answer). The Objective 
 ├── EDA/
 │   ├── Project1_Insurance_EDA.Rmd    # start here
 │   └── Project1_Insurance_EDA.html
+├── Objective_1/
+│   ├── Project1_Insurance_Objective1.Rmd
+│   └── Project1_Insurance_Objective1.html
+├── Objective_2/
+│   ├── Project1_Insurance_Objective2.Rmd
+│   └── Project1_Insurance_Objective2.html
 ├── README.md
 └── 6372-Project1-Insurance.Rproj
 ```
 
-Knit working directory is the **document** folder (`EDA/`). Data is read as `../data/insurance.csv`.
+Knit working directory is the **document** folder. From `EDA/`, `Objective_1/`, or `Objective_2/`, data is read as `../data/insurance.csv`.
 
 ## How to Reproduce
 
 1. Open `6372-Project1-Insurance.Rproj` in RStudio.
 2. Knit `EDA/Project1_Insurance_EDA.Rmd` (packages: `ggplot2`, `dplyr`, `tidyr`, `GGally`, `naniar`, `gridExtra`).
-3. Branch for a slice of work (`obj1-slr-mlr`, `obj2-compare`, `slides`).
-4. Knit the `.Rmd` before you push so the HTML matches.
-5. Do not commit `.RData`, Office lockfiles (`~$*`), or knitted `*_files/` folders.
+3. Knit `Objective_1/Project1_Insurance_Objective1.Rmd` and `Objective_2/Project1_Insurance_Objective2.Rmd`. Objective 2 also uses `caret`, `glmnet`, and `lmboot`.
+4. Branch for a slice of work (`obj1-slr-mlr`, `obj2-compare`, `slides`).
+5. Knit the `.Rmd` before you push so the HTML matches.
+6. Do not commit `.RData`, Office lockfiles (`~$*`), or knitted `*_files/` folders.
 
 To add the second GitHub user as a collaborator, send Aaron the GitHub username. The repo is **private**.
 

@@ -1,0 +1,905 @@
+---
+title: "Project 1 Objective 2: Predicting Insurance Charges"
+subtitle: "MSDS 6372: Jacob Turner"
+author: "Aaron Powell"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    df_print: kable
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width = 9,
+  fig.height = 4.6
+)
+library(ggplot2)
+library(dplyr)
+library(caret)
+library(glmnet)
+library(lmboot)
+theme_set(theme_bw())
+options(scipen = 999)
+```
+
+```{r helpers}
+# Dollar RMSE for one set of predictions.
+rmse <- function(obs, pred) {
+  sqrt(mean((obs - pred)^2))
+}
+
+# Round a number of dollars for the prose. Missing values print as a dash.
+dollars <- function(x) {
+  out <- rep("—", length(x))
+  ok <- !is.na(x)
+  out[ok] <- paste0(
+    ifelse(x[ok] < 0, "-", ""),
+    "$",
+    formatC(round(abs(x[ok])), format = "f", big.mark = ",", digits = 0)
+  )
+  out
+}
+
+range_words <- function(lo, hi) paste(dollars(lo), "to", dollars(hi))
+
+# AIC, BIC, adjusted R-squared, and PRESS for one lm fit.
+# PRESS sums the squared leave-one-out errors. It is not a dollar RMSE.
+linear_scores <- function(fit) {
+  data.frame(
+    AIC = AIC(fit),
+    BIC = BIC(fit),
+    adj_r2 = summary(fit)$adj.r.squared,
+    PRESS = sum((residuals(fit) / (1 - hatvalues(fit)))^2)
+  )
+}
+
+show_scores <- function(scores) {
+  out <- data.frame(
+    AIC = formatC(scores$AIC, format = "f", big.mark = ",", digits = 1),
+    BIC = formatC(scores$BIC, format = "f", big.mark = ",", digits = 1),
+    `Adjusted R2` = formatC(scores$adj_r2, format = "f", digits = 3),
+    PRESS = formatC(round(scores$PRESS), format = "f", big.mark = ",", digits = 0),
+    check.names = FALSE
+  )
+  rownames(out) <- NULL
+  out
+}
+
+# Classic 95% interval for one normal standard deviation.
+# Same formula as the Unit 3 exercise: the lower end uses the upper chi-square cutoff.
+sigma_ci <- function(x) {
+  n <- length(x)
+  s2 <- var(x)
+  lower <- sqrt((n - 1) * s2 / qchisq(0.05 / 2, n - 1, lower.tail = FALSE))
+  upper <- sqrt((n - 1) * s2 / qchisq(0.05 / 2, n - 1, lower.tail = TRUE))
+  c(lower, upper)
+}
+```
+
+Predicting charges for a new customer is a different job from explaining why charges differ. This notebook keeps the Objective 1 equation and compares it with the other methods from class. The order below is the order the models are fit: the Objective 1 regression, the full linear model, stepwise selection from that full model, penalized regression on that same full model, nearest neighbors, the bootstrap of the Objective 1 equation, bagged trees, and a random forest. The dollar comparison and the recommendation are at the end.
+
+Every prediction error is in dollars. An 80/20 split fits on 80 percent of the customers and scores the other 20 percent once. A 10-fold cross-validation rotates that check across the whole file. When the two disagree, the 10-fold result is the one we follow, because one split can move.
+
+## Data, split, and folds
+
+One exact duplicate is dropped in the code. The CSV is not edited. Sex, smoker, and region are factors with a stated reference level: female, non-smoker, and northeast. Those three levels do not get their own coefficient. Every sex, smoker, and region number below is a difference from that reference.
+
+```{r load-split}
+ins <- read.csv("../data/insurance.csv", stringsAsFactors = TRUE) %>%
+  distinct() %>%
+  mutate(
+    sex = factor(sex, levels = c("female", "male")),
+    smoker = factor(smoker, levels = c("no", "yes")),
+    region = factor(region, levels = c("northeast", "northwest", "southeast", "southwest"))
+  )
+
+# Objective 1 equation, unchanged. Sex is not in it.
+obj1_formula <- charges ~ age + children + bmi * smoker + region
+
+# Every recorded field, including sex, and every product of two fields.
+# Quadratic BMI was tested, but doesn't provide statistical significance.
+# Hence, no squared BMI term.
+full_formula <- charges ~ (age + sex + bmi + children + smoker + region)^2
+
+# Raw fields for nearest neighbors and trees. The product bmi * smoker is not
+# written here. A tree can split on smoker and then on BMI. After scaling,
+# a high-BMI smoker sits near other high-BMI smokers.
+np_formula <- charges ~ age + sex + bmi + children + smoker + region
+
+# The 80:20 Split
+set.seed(1234)
+train_index <- createDataPartition(ins$charges, p = 0.8, list = FALSE)
+train <- ins[train_index, ]
+valid <- ins[-train_index, ]
+
+# kNN config
+set.seed(1234)
+fold_index <- createFolds(ins$charges, k = 10, returnTrain = TRUE)
+cv_control <- trainControl(method = "cv", number = 10, index = fold_index)
+
+# glmnet wants the fold number of each row, not the list of training rows.
+fold_id <- rep(0, nrow(ins))
+for (i in seq_along(fold_index)) {
+  left_out <- setdiff(1:nrow(ins), fold_index[[i]])
+  fold_id[left_out] <- i
+}
+
+# Tuning uses only the training customers. The 20% are scored after k,
+# the penalty, and mtry have already been chosen.
+set.seed(1234)
+train_fold_index <- createFolds(train$charges, k = 10, returnTrain = TRUE)
+train_control <- trainControl(method = "cv", number = 10, index = train_fold_index)
+train_fold_id <- rep(0, nrow(train))
+for (i in seq_along(train_fold_index)) {
+  left_out <- setdiff(1:nrow(train), train_fold_index[[i]])
+  train_fold_id[left_out] <- i
+}
+
+# 10-fold dollar RMSE for one fixed lm formula. Same folds every time.
+cv_lm <- function(formula) {
+  fold_rmse <- numeric(length(fold_index))
+  for (i in seq_along(fold_index)) {
+    fit_rows <- fold_index[[i]]
+    score_rows <- setdiff(1:nrow(ins), fit_rows)
+    fit_i <- lm(formula, data = ins[fit_rows, ])
+    pred_i <- predict(fit_i, newdata = ins[score_rows, ])
+    fold_rmse[i] <- rmse(ins$charges[score_rows], pred_i)
+  }
+  fold_rmse
+}
+```
+
+The file has `r nrow(ins)` distinct customers. The split uses `r nrow(train)` to fit and `r nrow(valid)` to score once. The same ten folds are used for every 10-fold number below.
+
+### Reproducing
+
+The seed is 1234. It is set again before the split, before the folds on the full file, and before the folds inside the training rows. Those three steps draw a random sample, and resetting the seed keeps them from depending on each other. Nearest neighbors and the penalty do not draw a sample. They use these folds, so they do not get a seed of their own. Each tree fit draws a bootstrap sample, so the seed for a tree is set on that fit later, not here.
+
+## Objective 1 regression
+
+The prediction comparison starts from the equation already chosen for explanation: age, number of children, BMI, smoker, the product of BMI and smoker, and region. The fit here uses the training customers only, so it is scored on the same rows as the other models. The intervals we would quote for this equation are in the bootstrap section, where the same formula is fit to every customer.
+
+```{r obj1-fit}
+obj1_fit <- lm(obj1_formula, data = train)
+obj1_scores <- linear_scores(obj1_fit)
+obj1_gap30 <- coef(obj1_fit)["smokeryes"] + 30 * coef(obj1_fit)["bmi:smokeryes"]
+
+obj1_fold_rmse <- cv_lm(obj1_formula)
+obj1_cv <- mean(obj1_fold_rmse)
+obj1_cv_sd <- sd(obj1_fold_rmse)
+obj1_holdout <- rmse(valid$charges, predict(obj1_fit, newdata = valid))
+```
+
+Training fit, in dollars. Smoker is compared with non-smoker. Region is compared with the northeast.
+
+\[
+\begin{aligned}
+\widehat{\text{charges}}
+&= -2{,}821 + 263\,\text{age} + 563\,\text{children} + 43\,\text{bmi} - 20{,}439\,\text{smoker} \\
+&\quad - 835\,\text{northwest} - 1{,}619\,\text{southeast} - 1{,}559\,\text{southwest} \\
+&\quad + 1{,}441\,(\text{bmi} \times \text{smoker})
+\end{aligned}
+\]
+
+Objective 1 set these terms. Sex stays out. The product of BMI and smoker stays in. Region is a level shift, not a different smoker slope. 
+
+```{r obj1-scores}
+show_scores(obj1_scores)
+```
+
+The smoker coefficient is the gap at a BMI of 0. That is not a customer we insure. At BMI 30 the smoker gap on this training fit is `r dollars(obj1_gap30)`. One year of age is `r dollars(coef(obj1_fit)["age"])`. One additional child is `r dollars(coef(obj1_fit)["children"])`. The non-smoker BMI slope is `r dollars(coef(obj1_fit)["bmi"])` per point. Northwest, southeast, and southwest are differences from the northeast. These are point estimates from the training customers. They are not a new set of intervals.
+
+PRESS in the table is the sum of squared leave-one-out errors on the training customers. It is compared only with the other linear models. It is not the dollar prediction error.
+
+## Full linear model
+
+The complex model puts sex back in and frees every product of two recorded fields. Age by smoker, BMI by region, smoker by region, and the rest of the pairs are all available. No squared BMI term is added. Stepwise and the penalty start from this equation and are allowed to remove terms. Nothing has been removed yet.
+
+```{r full-fit}
+full_fit <- lm(full_formula, data = train)
+full_scores <- linear_scores(full_fit)
+
+full_fold_rmse <- cv_lm(full_formula)
+full_cv <- mean(full_fold_rmse)
+full_cv_sd <- sd(full_fold_rmse)
+full_holdout <- rmse(valid$charges, predict(full_fit, newdata = valid))
+```
+
+Training fit, in dollars. There are `r length(coef(full_fit)) - 1` terms besides the intercept. Sex is compared with female, smoker with non-smoker, and region with the northeast.
+
+\[
+\begin{aligned}
+\widehat{\text{charges}}
+&= -2{,}366 + 216\,\text{age} - 1{,}078\,\text{male} + 77\,\text{bmi} + 461\,\text{children} - 21{,}161\,\text{smoker} \\
+&\quad - 1{,}933\,\text{northwest} + 2{,}503\,\text{southeast} - 1{,}341\,\text{southwest} \\
+&\quad + 9\,(\text{age} \times \text{male}) + 1\,(\text{age} \times \text{bmi}) - 0.3\,(\text{age} \times \text{children}) \\
+&\quad - 15\,(\text{age} \times \text{smoker}) + 11\,(\text{age} \times \text{northwest}) + 48\,(\text{age} \times \text{southeast}) + 51\,(\text{age} \times \text{southwest}) \\
+&\quad - 1\,(\text{male} \times \text{bmi}) - 173\,(\text{male} \times \text{children}) - 381\,(\text{male} \times \text{smoker}) \\
+&\quad + 359\,(\text{male} \times \text{northwest}) + 530\,(\text{male} \times \text{southeast}) + 97\,(\text{male} \times \text{southwest}) \\
+&\quad + 9\,(\text{bmi} \times \text{children}) + 1{,}515\,(\text{bmi} \times \text{smoker}) \\
+&\quad + 5\,(\text{bmi} \times \text{northwest}) - 177\,(\text{bmi} \times \text{southeast}) - 82\,(\text{bmi} \times \text{southwest}) \\
+&\quad - 254\,(\text{children} \times \text{smoker}) + 301\,(\text{children} \times \text{northwest}) \\
+&\quad - 297\,(\text{children} \times \text{southeast}) - 84\,(\text{children} \times \text{southwest}) \\
+&\quad - 337\,(\text{smoker} \times \text{northwest}) - 1{,}931\,(\text{smoker} \times \text{southeast}) + 1{,}270\,(\text{smoker} \times \text{southwest})
+\end{aligned}
+\]
+
+This is the starting equation, not a selected one. Sex is the difference from female. Smoker is the difference from non-smoker at BMI 0, and only when the other fields in that product are zero. Region is the difference from the northeast. The training scores are what AIC and BIC see before anything is removed.
+
+```{r full-scores}
+show_scores(full_scores)
+```
+
+The comparison at the end is where this equation is judged against the shorter one. A larger adjusted \(R^2\) on the training customers is not, by itself, a reason to use every product for a new customer.
+
+## Stepwise regression
+
+Stepwise starts at the full linear model and walks in both directions, adding or dropping one term at a time. The criterion is AIC. It is not a p-value search. The equation below is the one the search kept on the training customers.
+
+The 10-fold score cannot call `cv_lm`, because `cv_lm` expects one fixed formula. The search is repeated inside each fold. Otherwise the customers being scored would have helped choose the terms.
+
+```{r step-fit}
+# Code is complex to get a CV score
+step_fit <- step(
+  full_fit,
+  scope = list(lower = ~1, upper = full_formula),
+  direction = "both",
+  trace = 0 # trace = 0 hides the path of AIC values
+)
+step_scores <- linear_scores(step_fit)
+
+step_fold_rmse <- numeric(length(fold_index))
+for (i in seq_along(fold_index)) {
+  fit_rows <- fold_index[[i]]
+  score_rows <- setdiff(1:nrow(ins), fit_rows)
+  full_i <- lm(full_formula, data = ins[fit_rows, ])
+  step_i <- step(
+    full_i,
+    scope = list(lower = ~1, upper = full_formula),
+    direction = "both",
+    trace = 0 # trace = 0 hides the path of AIC values
+  )
+  pred_i <- predict(step_i, newdata = ins[score_rows, ])
+  step_fold_rmse[i] <- rmse(ins$charges[score_rows], pred_i)
+}
+step_cv <- mean(step_fold_rmse)
+step_cv_sd <- sd(step_fold_rmse)
+step_holdout <- rmse(valid$charges, predict(step_fit, newdata = valid))
+```
+
+\[
+\begin{aligned}
+\widehat{\text{charges}}
+&= -4{,}263 + 263\,\text{age} - 778\,\text{male} + 104\,\text{bmi} + 553\,\text{children} - 21{,}692\,\text{smoker} \\
+&\quad - 1{,}099\,\text{northwest} + 3{,}904\,\text{southeast} + 114\,\text{southwest} \\
+&\quad + 1{,}498\,(\text{bmi} \times \text{smoker}) \\
+&\quad + 11\,(\text{bmi} \times \text{northwest}) - 163\,(\text{bmi} \times \text{southeast}) - 64\,(\text{bmi} \times \text{southwest}) \\
+&\quad - 379\,(\text{smoker} \times \text{northwest}) - 1{,}759\,(\text{smoker} \times \text{southeast}) + 1{,}087\,(\text{smoker} \times \text{southwest})
+\end{aligned}
+\]
+
+AIC kept `r length(coef(step_fit)) - 1` terms, against `r length(coef(obj1_fit)) - 1` in the Objective 1 equation. `r if ("bmi:smokeryes" %in% names(coef(step_fit))) "The product of BMI and smoker is still there." else "The product of BMI and smoker was dropped."` `r if ("sexmale" %in% names(coef(step_fit))) "Sex, which Objective 1 left out, is in this equation." else "Sex is not in this equation."` `r if (any(grepl("smokeryes:region", names(coef(step_fit))))) "The smoker coefficient is allowed to differ by region." else "The smoker coefficient is not given its own region terms."` `r if (any(grepl("^bmi:region", names(coef(step_fit))))) "The BMI slope is allowed to differ by region." else "The BMI slope is not given its own region terms."`
+
+```{r step-scores}
+show_scores(step_scores)
+```
+
+Training AIC is `r formatC(step_scores$AIC, format = "f", big.mark = ",", digits = 1)`, against `r formatC(obj1_scores$AIC, format = "f", big.mark = ",", digits = 1)` for the Objective 1 equation. `r if (step_scores$AIC < obj1_scores$AIC) "AIC prefers this larger equation. That is what the search was asked to optimize." else "AIC does not prefer this equation over Objective 1."` `r if (all(c("smokeryes", "bmi:smokeryes") %in% names(coef(step_fit)))) paste0("The smoker coefficient is still the gap at BMI 0, ", dollars(coef(step_fit)["smokeryes"]), ". In the northeast, at BMI 30, those two pieces add to ", dollars(unname(coef(step_fit)["smokeryes"] + 30 * coef(step_fit)["bmi:smokeryes"])), ".", if (any(grepl("smokeryes:region", names(coef(step_fit))))) " In the other regions the smoker-by-region terms move that gap." else "") else ""`
+
+## Penalized regression
+
+The penalty is lasso, fit to the same full linear model. In the code, `alpha = 1` is the lasso: a strong enough penalty sets a coefficient to exactly zero. `glmnet` standardizes each field on its own. The fields are not centered a second time. The penalty we keep is `lambda.1se`, the strongest penalty that stays within one standard error of the lowest cross-validated squared error.
+
+`model.matrix` is built once on the whole file, and the intercept column is dropped because `glmnet` adds its own. Building that matrix on the validation rows alone can drop a region and then the columns no longer match.
+
+```{r lasso-fit}
+x <- model.matrix(full_formula, data = ins)[, -1]
+
+lasso_cv <- cv.glmnet(
+  x, ins$charges,
+  alpha = 1,
+  foldid = fold_id,
+  keep = TRUE
+)
+
+# cvm is a squared error. Dollar RMSE uses the out-of-fold predictions
+# at the penalty we keep.
+penalty_col <- which.min(abs(lasso_cv$lambda - lasso_cv$lambda.1se))
+out_of_fold <- lasso_cv$fit.preval[, penalty_col]
+lasso_fold_rmse <- numeric(length(fold_index))
+for (i in seq_along(fold_index)) {
+  rows <- fold_id == i
+  lasso_fold_rmse[i] <- rmse(ins$charges[rows], out_of_fold[rows])
+}
+lasso_cv_rmse <- mean(lasso_fold_rmse)
+lasso_cv_sd <- sd(lasso_fold_rmse)
+
+lasso_train <- cv.glmnet(
+  x[train_index, ],
+  train$charges,
+  alpha = 1,
+  foldid = train_fold_id
+)
+lasso_pred <- as.numeric(predict(
+  lasso_train,
+  newx = x[-train_index, ],
+  s = "lambda.1se"
+))
+lasso_holdout <- rmse(valid$charges, lasso_pred)
+
+b_pen <- as.matrix(coef(lasso_cv, s = "lambda.1se"))
+i_min <- which.min(abs(lasso_cv$lambda - lasso_cv$lambda.min))
+i_1se <- which.min(abs(lasso_cv$lambda - lasso_cv$lambda.1se))
+n_start <- nrow(b_pen) - 1
+n_at_min <- lasso_cv$nzero[i_min]
+n_keep <- lasso_cv$nzero[i_1se]
+penalty_keeps_bmi <- "bmi:smokeryes" %in% rownames(b_pen) && b_pen["bmi:smokeryes", 1] != 0
+```
+
+`keep = TRUE` saves each customer's out-of-fold prediction. That is how the squared error on the plot becomes a dollar RMSE. No seed is set. `foldid` already fixes the folds.
+
+The horizontal axis is the penalty. Farther right is a stronger penalty. The vertical axis is cross-validated squared error, in millions, so the axis is readable. The numbers along the top are how many terms have not yet been removed. The right dotted line is the penalty in the equation below.
+
+```{r lasso-mse, fig.height=4.6}
+pen <- data.frame(
+  log_penalty = log(lasso_cv$lambda),
+  mse = lasso_cv$cvm,
+  se = lasso_cv$cvsd,
+  nzero = lasso_cv$nzero
+)
+# Label the lowest squared error, the penalty we keep, and the drop toward no terms.
+rise <- which(pen$nzero %in% c(6, 2, 0))
+rise <- rise[!duplicated(pen$nzero[rise])]
+lab_idx <- unique(c(i_min, i_1se, rise))
+pen_labs <- pen[lab_idx, ]
+# Pull the two term counts we discuss off the dotted lines so they can be read.
+pen_labs$hjust <- ifelse(
+  pen_labs$nzero == n_at_min, 1.15,
+  ifelse(pen_labs$nzero == n_keep, -0.15, 0.5)
+)
+y_lab <- max(pen$mse + pen$se) * 1.08
+ggplot(pen, aes(x = log_penalty, y = mse / 1e6)) +
+  geom_errorbar(
+    aes(ymin = (mse - se) / 1e6, ymax = (mse + se) / 1e6),
+    width = 0, color = "grey75"
+  ) +
+  geom_point(color = "red", size = 1.4) +
+  geom_vline(xintercept = log(lasso_cv$lambda.min), linetype = 2) +
+  geom_vline(xintercept = log(lasso_cv$lambda.1se), linetype = 2) +
+  geom_text(
+    data = pen_labs,
+    aes(y = y_lab / 1e6, label = nzero),
+    hjust = pen_labs$hjust,
+    size = 3, vjust = 0
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0.02, 0.16))) +
+  labs(
+    title = "Penalty versus cross-validated squared error",
+    subtitle = "Numbers at the top count terms still in use. The right dotted line is the penalty in the equation.",
+    x = "Log penalty. Right is a stronger penalty.",
+    y = "Squared error (millions)"
+  )
+```
+
+The left dotted line is the penalty with the smallest squared error. It still uses `r n_at_min` terms. The right dotted line uses `r n_keep` of the original `r n_start`. Between the lines the squared error barely changes. Farther right, once only a few terms remain, the error climbs. The stronger penalty has started to remove signal, not only terms the equation did not need.
+
+The second chart follows the same penalty. Each line is one coefficient, pulled toward zero as the penalty grows. The left panel is the smoker coefficient at a BMI of 0. It is large because the BMI slope for smokers is also in the model, and it is drawn alone so it does not hide the other lines. The dotted line is the penalty in the equation. This is shrinkage. It is not a new test of whether smoking or age is associated with charges.
+
+```{r lasso-paths, fig.height=4.8}
+beta_path <- as.matrix(lasso_cv$glmnet.fit$beta)
+show_terms <- c(
+  "smokeryes", "age", "bmi", "children", "bmi:smokeryes",
+  "regionnorthwest", "regionsoutheast", "regionsouthwest"
+)
+pretty_term <- c(
+  smokeryes = "Smoker at BMI 0",
+  age = "Age",
+  bmi = "BMI, non-smoker",
+  children = "Children",
+  "bmi:smokeryes" = "BMI x smoker",
+  regionnorthwest = "Northwest",
+  regionsoutheast = "Southeast",
+  regionsouthwest = "Southwest"
+)
+path_df <- data.frame()
+for (nm in show_terms) {
+  one_term <- data.frame(
+    term = unname(pretty_term[nm]),
+    panel = ifelse(
+      nm == "smokeryes",
+      "Smoker term at BMI 0",
+      "Other terms"
+    ),
+    log_penalty = log(lasso_cv$glmnet.fit$lambda),
+    coefficient = beta_path[nm, ],
+    stringsAsFactors = FALSE
+  )
+  path_df <- rbind(path_df, one_term)
+}
+path_df$panel <- factor(
+  path_df$panel,
+  levels = c("Smoker term at BMI 0", "Other terms")
+)
+ggplot(path_df, aes(x = log_penalty, y = coefficient, color = term)) +
+  geom_line(linewidth = 0.7) +
+  geom_hline(yintercept = 0, linewidth = 0.3) +
+  geom_vline(xintercept = log(lasso_cv$lambda.1se), linetype = 2) +
+  facet_wrap(~panel, scales = "free_y") +
+  scale_y_continuous(expand = expansion(mult = c(0.08, 0.12))) +
+  labs(
+    title = "Coefficients pulled toward zero as the penalty increases",
+    subtitle = "The dotted line is the penalty used in the equation.",
+    x = "Log penalty. Right is a stronger penalty.",
+    y = "Coefficient (dollars)",
+    color = NULL
+  )
+```
+
+Coefficients the penalty set to zero are omitted. The holdout score uses its own penalty, chosen from the training customers only. The fit at the right dotted line, in dollars, is below.
+
+\[
+\begin{aligned}
+\widehat{\text{charges}}
+&= -1{,}817 + 162\,\text{age} - 61\,\text{male} - 2{,}741\,\text{smoker} - 140\,\text{southwest} \\
+&\quad + 3\,(\text{age} \times \text{bmi}) + 2\,(\text{age} \times \text{children}) - 127\,(\text{male} \times \text{southwest}) \\
+&\quad + 11\,(\text{bmi} \times \text{children}) + 886\,(\text{bmi} \times \text{smoker}) - 11\,(\text{bmi} \times \text{southeast}) \\
+&\quad - 99\,(\text{children} \times \text{smoker}) + 139\,(\text{children} \times \text{northwest}) - 126\,(\text{children} \times \text{southwest}) \\
+&\quad - 627\,(\text{smoker} \times \text{northwest})
+\end{aligned}
+\]
+
+The right dotted line is this equation. It keeps `r n_keep` of `r n_start` terms. `r if (penalty_keeps_bmi) "The product of BMI and smoker is still active." else "The product of BMI and smoker has been removed."` AIC, BIC, adjusted \(R^2\), and PRESS are not defined once a penalty has been added, so they are left blank in the comparison. `r if (all(c("smokeryes", "bmi:smokeryes") %in% rownames(b_pen)) && b_pen["smokeryes", 1] != 0 && b_pen["bmi:smokeryes", 1] != 0) paste0("The smoker coefficient is still the piece at BMI 0, ", dollars(b_pen["smokeryes", 1]), ". Adding 30 times the BMI-by-smoker coefficient brings that piece to ", dollars(b_pen["smokeryes", 1] + 30 * b_pen["bmi:smokeryes", 1]), ". Other products in this equation can still move the smoker difference, so that sum is not the gap for every customer.") else ""` There is no t-test on a coefficient the penalty already decided to keep or drop.
+
+## Nearest neighbors
+
+Nearest neighbors predict a customer from the charges of the nearest customers. Age and BMI are large numbers and smoker is a yes-or-no flag, so the fields are centered and scaled first. Without that, distance would be mostly age and BMI, and the neighborhood would ignore smoking. The formula is the raw fields, including sex. After scaling, a high-BMI smoker is near other high-BMI smokers.
+
+The plot is 10-fold CV on the whole file. The 80/20 score uses a neighborhood chosen inside the training rows only. No seed is set. The folds are already fixed, and this fit does not draw a sample.
+
+```{r knn-fit}
+knn_cv <- train(
+  np_formula,
+  data = ins,
+  method = "knn",
+  trControl = cv_control,
+  preProcess = c("center", "scale"),
+  tuneGrid = expand.grid(k = c(1:10, 20, 30))
+)
+knn_hold <- train(
+  np_formula,
+  data = train,
+  method = "knn",
+  trControl = train_control,
+  preProcess = c("center", "scale"),
+  tuneGrid = expand.grid(k = c(1:10, 20, 30))
+)
+k_chosen <- knn_cv$bestTune$k
+k_rmse <- function(k) knn_cv$results$RMSE[knn_cv$results$k == k]
+knn_cv_rmse <- mean(knn_cv$resample$RMSE)
+knn_cv_sd <- sd(knn_cv$resample$RMSE)
+knn_holdout <- rmse(valid$charges, predict(knn_hold, newdata = valid))
+```
+
+```{r knn-k, fig.height=4.2}
+k_plot <- knn_cv$results
+k_plot$choice <- ifelse(k_plot$k == k_chosen, "Chosen", "Tried")
+ggplot(k_plot, aes(x = k, y = RMSE)) +
+  geom_line(color = "grey35") +
+  geom_point(aes(shape = choice), size = 2.4) +
+  scale_shape_manual(values = c(Chosen = 16, Tried = 1)) +
+  labs(
+    title = "Nearest-neighbor error by neighborhood size",
+    x = "Number of neighbors",
+    y = "10-fold error (RMSE, dollars)",
+    shape = NULL
+  )
+```
+
+A neighborhood of 1 copies the nearest customer. That prediction moves sharply when the file changes, which is variance. A neighborhood of 30 averages people who are not very alike. That prediction is stable and can be systematically off, which is bias. The marked point is the size the 10-fold check chose, \(k = `r k_chosen`\).
+
+At one neighbor the 10-fold error is `r dollars(k_rmse(1))`. At 30 neighbors it is `r dollars(k_rmse(30))`. At \(k = `r k_chosen`\) it is `r dollars(k_rmse(k_chosen))`. There is no regression equation for this method. The prediction is an average of neighbors, not a list of coefficients.
+
+## Bootstrap
+
+EDA and objective 1 analysis of residuals revealed evidence against constant variance and normality in the insurance data. Log transformation of charges resolved concerns against normality, but residual vs fitted plots still displayed evidence against constant variance. This is a practical reason to presume paired bootstrap as the appropriate method. 
+
+The next two sub-sections revisit bootstrap methods, but on the insurance dataset.
+
+### Methods 
+
+Bootstrap is revisiting residuals (misses) from the Objective 1 equation, now fit to all `r nrow(ins)` customers rather than to the training split. A `residual.boot` method keeps the fitted charges and redraws the misses with replacement, then recomputes the coefficients, and presents constant variance among residuals. A `paired.boot` method keeps each customer with their own miss and refits, and represents the variance sampled. 
+
+```{r residual-plot, fig.height=4.4}
+obj1_all <- lm(obj1_formula, data = ins)
+resid_obj1 <- resid(obj1_all)
+
+set.seed(1234)
+one_redraw <- sample(resid_obj1, replace = TRUE)
+
+observed <- data.frame(
+  fitted = fitted(obj1_all),
+  residual = resid_obj1,
+  smoker = ins$smoker,
+  panel = "Objective 1 residuals"
+)
+redrawn <- data.frame(
+  fitted = fitted(obj1_all),
+  residual = one_redraw,
+  smoker = ins$smoker,
+  panel = "Residual bootstrap residuals"
+)
+resid_plot <- rbind(observed, redrawn)
+ggplot(resid_plot, aes(x = fitted, y = residual, color = smoker)) +
+  geom_point(alpha = 0.35, size = 0.8) +
+  geom_hline(yintercept = 0, linewidth = 0.3) +
+  facet_wrap(~panel) +
+  labs(
+    title = "Objective 1 residuals against one residual-bootstrap draw",
+    x = "Fitted charges ($)",
+    y = "Residual ($)"
+  )
+```
+
+Smoker residuals vs fitted charges are wider, and a group of non-smokers sit far above the line. The right panel is one redraw from the single pool of Objective 1 residuals, placed back on the same fitted charges, representing constant variance. The two panels do not match. 
+
+The ordinary range below is the chi-square interval from class. It assumes normal misses and one common spread. The paired range refits the equation on customers drawn with replacement, 1,000 times, and records the standard deviation of those refit residuals. The residual-bootstrap range redraws from the one pool. 
+
+```{r sigma-intervals}
+# Paired bootstrap: resample customers, refit, record the residual SD.
+set.seed(1234)
+paired_sd_all <- numeric(1000)
+paired_sd_no <- numeric(1000)
+paired_sd_yes <- numeric(1000)
+for (b in 1:1000) {
+  rows <- sample.int(nrow(ins), replace = TRUE)
+  fit_b <- lm(obj1_formula, data = ins[rows, ])
+  miss <- resid(fit_b)
+  smoker_b <- ins$smoker[rows]
+  paired_sd_all[b] <- sd(miss)
+  paired_sd_no[b] <- sd(miss[smoker_b == "no"])
+  paired_sd_yes[b] <- sd(miss[smoker_b == "yes"])
+}
+
+# Residual bootstrap: redraw the Objective 1 misses and record their SD.
+set.seed(1234)
+resid_sd_boot <- numeric(1000)
+for (b in 1:1000) {
+  resid_sd_boot[b] <- sd(sample(resid_obj1, replace = TRUE))
+}
+
+sd_all <- sd(resid_obj1)
+sd_no <- sd(resid_obj1[ins$smoker == "no"])
+sd_yes <- sd(resid_obj1[ins$smoker == "yes"])
+ord_all <- sigma_ci(resid_obj1)
+ord_no <- sigma_ci(resid_obj1[ins$smoker == "no"])
+ord_yes <- sigma_ci(resid_obj1[ins$smoker == "yes"])
+pair_all <- quantile(paired_sd_all, c(0.025, 0.975))
+pair_no <- quantile(paired_sd_no, c(0.025, 0.975))
+pair_yes <- quantile(paired_sd_yes, c(0.025, 0.975))
+resid_ci <- quantile(resid_sd_boot, c(0.025, 0.975))
+
+data.frame(
+  Spread = c("All residuals", "Non-smokers", "Smokers"),
+  Estimate = dollars(c(sd_all, sd_no, sd_yes)),
+  `Ordinary range` = c(
+    range_words(ord_all[1], ord_all[2]),
+    range_words(ord_no[1], ord_no[2]),
+    range_words(ord_yes[1], ord_yes[2])
+  ),
+  `Paired bootstrap` = c(
+    range_words(pair_all[1], pair_all[2]),
+    range_words(pair_no[1], pair_no[2]),
+    range_words(pair_yes[1], pair_yes[2])
+  ),
+  `Residual bootstrap` = c(
+    range_words(resid_ci[1], resid_ci[2]),
+    "—",
+    "—"
+  ),
+  check.names = FALSE
+)
+```
+
+### Statistical Analysis
+
+The smoker residual standard deviation is about `r dollars(sd_yes)`, against about `r dollars(sd_no)` for non-smokers. `r if (ord_yes[1] > ord_no[2]) "The ordinary ranges do not overlap." else "The ordinary ranges overlap."` `r if (pair_yes[1] > pair_no[2]) "The paired ranges do not overlap either." else paste0("The paired ranges are wider and just meet, smokers ", range_words(pair_yes[1], pair_yes[2]), " and non-smokers ", range_words(pair_no[1], pair_no[2]), ".")` One shared standard deviation is still a poor summary of the left panel. The residual-bootstrap range lines up with the ordinary range, which is what happens when both methods assume one pool. This spread is the explanation model's misses. It is not the prediction error in the comparison.
+
+This is why the picture matters for the model we would use on a new customer. A linear equation can still explain an average difference. It is a weak production score if one error bar has to cover every customer, because a smoker and a non-smoker do not miss by the same amount. The trees below do not inherit that assumption. They also do not replace the explanation.
+
+The ranges below are two average effects on the full file: one extra year of age, and the smoker difference at a BMI of 30. They are not the residual standard deviation above, and they are not a prediction interval for one future customer. `paired.boot` and `residual.boot` each use 1,000 resamples and seed 1234. The ordinary smoker gap is the Objective 1 contrast: the smoker coefficient plus 30 times the BMI interaction.
+
+```{r coefficient-intervals}
+boot_paired <- paired.boot(obj1_formula, B = 1000, seed = 1234, data = ins)
+boot_resid <- residual.boot(obj1_formula, B = 1000, seed = 1234, data = ins)
+
+age_ordinary <- confint(obj1_all)["age", ]
+age_paired <- quantile(boot_paired$bootEstParam[, "age"], c(0.025, 0.975))
+age_resid <- quantile(boot_resid$bootEstParam[, "age"], c(0.025, 0.975))
+
+# Smoker gap at BMI 30. L is 1 on the smoker coefficient and 30 on the interaction.
+b_all <- coef(obj1_all)
+L <- rep(0, length(b_all))
+names(L) <- names(b_all)
+L["smokeryes"] <- 1
+L["bmi:smokeryes"] <- 30
+gap_hat <- sum(L * b_all)
+gap_se <- sqrt(drop(t(L) %*% vcov(obj1_all) %*% L))
+gap_t <- qt(0.975, df.residual(obj1_all))
+gap_ordinary <- c(gap_hat - gap_t * gap_se, gap_hat + gap_t * gap_se)
+
+gap_paired <- quantile(
+  boot_paired$bootEstParam[, "smokeryes"] + 30 * boot_paired$bootEstParam[, "bmi:smokeryes"],
+  c(0.025, 0.975)
+)
+gap_resid <- quantile(
+  boot_resid$bootEstParam[, "smokeryes"] + 30 * boot_resid$bootEstParam[, "bmi:smokeryes"],
+  c(0.025, 0.975)
+)
+
+data.frame(
+  Contrast = c("Age, one year", "Smoker gap at BMI 30"),
+  `Ordinary range` = c(
+    range_words(age_ordinary[1], age_ordinary[2]),
+    range_words(gap_ordinary[1], gap_ordinary[2])
+  ),
+  `Paired bootstrap` = c(
+    range_words(age_paired[1], age_paired[2]),
+    range_words(gap_paired[1], gap_paired[2])
+  ),
+  `Residual bootstrap` = c(
+    range_words(age_resid[1], age_resid[2]),
+    range_words(gap_resid[1], gap_resid[2])
+  ),
+  check.names = FALSE
+)
+```
+
+### Result
+
+The paired range is the one that matches the residual plot. Residual bootstrap and the ordinary interval both treat the misses as exchangeable, and they stay close to each other for that reason.
+
+## Bagged trees
+
+Bagged trees are the ensemble. Each tree is fit on a bootstrap sample of customers and may use every field at a split. The prediction is the average of the trees. Caret fits this with `method = "treebag"`. The fields are the same raw fields used for nearest neighbors. There is no equation to write down.
+
+The seed sits on the fit because each tree draws a sample. The 10-fold fit uses the full-file folds. The holdout fit chooses nothing from the 20 percent; bagged trees have no tuning parameter in this call, and the validation rows are used only for the score.
+
+```{r bag-fit}
+set.seed(1234)
+bag_cv <- train(
+  np_formula,
+  data = ins,
+  method = "treebag",
+  trControl = cv_control
+)
+set.seed(1234)
+bag_hold <- train(
+  np_formula,
+  data = train,
+  method = "treebag",
+  trControl = train_control
+)
+bag_cv_rmse <- mean(bag_cv$resample$RMSE)
+bag_cv_sd <- sd(bag_cv$resample$RMSE)
+bag_holdout <- rmse(valid$charges, predict(bag_hold, newdata = valid))
+```
+
+## Random forest
+
+A random forest is the same kind of average, except each split may look at only some of the fields. That number is `mtry`. Caret fits the forest with `method = "rf"`. The `randomForest` package is not loaded, and `ntree` is left at the caret default. The seed is set on each fit for the same reason as the bagged trees: if the forest continued the bagged-trees random draws, changing the bagged fit would change the forest. `mtry` for the holdout score is chosen inside the training rows.
+
+```{r forest-fit}
+set.seed(1234)
+forest_cv <- train(
+  np_formula,
+  data = ins,
+  method = "rf",
+  trControl = cv_control,
+  tuneLength = 3
+)
+set.seed(1234)
+forest_hold <- train(
+  np_formula,
+  data = train,
+  method = "rf",
+  trControl = train_control,
+  tuneLength = 3
+)
+forest_cv_rmse <- mean(forest_cv$resample$RMSE)
+forest_cv_sd <- sd(forest_cv$resample$RMSE)
+forest_holdout <- rmse(valid$charges, predict(forest_hold, newdata = valid))
+```
+
+The 10-fold forest uses `r forest_cv$finalModel$ntree` trees and considers `r forest_cv$bestTune$mtry` fields at each split. Bagged trees consider every field at each split. That is why the two are not the same model. 
+
+## Comparison
+
+The table follows the order the models were fit. A dash means the statistic is not defined for that method. AIC, BIC, adjusted \(R^2\), and PRESS are training scores from the linear fits on the `r nrow(train)` training customers. The last two columns are prediction checks, in dollars. The recommendation follows those two columns, not AIC.
+
+```{r comparison-table}
+compare <- data.frame(
+  model = c(
+    "Objective 1 regression",
+    "Full linear model",
+    "Stepwise",
+    "Penalized regression",
+    "kNN",
+    "Bagged trees",
+    "Random forest"
+  ),
+  AIC = c(obj1_scores$AIC, full_scores$AIC, step_scores$AIC, NA, NA, NA, NA),
+  BIC = c(obj1_scores$BIC, full_scores$BIC, step_scores$BIC, NA, NA, NA, NA),
+  adj_r2 = c(obj1_scores$adj_r2, full_scores$adj_r2, step_scores$adj_r2, NA, NA, NA, NA),
+  PRESS = c(obj1_scores$PRESS, full_scores$PRESS, step_scores$PRESS, NA, NA, NA, NA),
+  cv_rmse = c(
+    obj1_cv, full_cv, step_cv, lasso_cv_rmse,
+    knn_cv_rmse, bag_cv_rmse, forest_cv_rmse
+  ),
+  cv_sd = c(
+    obj1_cv_sd, full_cv_sd, step_cv_sd, lasso_cv_sd,
+    knn_cv_sd, bag_cv_sd, forest_cv_sd
+  ),
+  valid_rmse = c(
+    obj1_holdout, full_holdout, step_holdout, lasso_holdout,
+    knn_holdout, bag_holdout, forest_holdout
+  ),
+  stringsAsFactors = FALSE
+)
+
+show_num <- function(x, digits) {
+  ifelse(
+    is.na(x),
+    "—",
+    formatC(round(x, digits), format = "f", big.mark = ",", digits = digits)
+  )
+}
+shown <- data.frame(
+  Model = compare$model,
+  AIC = show_num(compare$AIC, 1),
+  BIC = show_num(compare$BIC, 1),
+  `Adjusted R2` = show_num(compare$adj_r2, 3),
+  PRESS = show_num(compare$PRESS, 0),
+  `10-fold CV RMSE` = show_num(compare$cv_rmse, 0),
+  `80/20 RMSE` = show_num(compare$valid_rmse, 0),
+  check.names = FALSE
+)
+rownames(shown) <- NULL
+shown
+```
+
+### The two prediction checks
+
+The 10-fold column scores every customer left out from the fold and combines scores. The 80/20 column is one split. More useful, but noiser, comparison. `r if (compare$model[which.min(compare$cv_rmse)] == compare$model[which.min(compare$valid_rmse)]) paste0("Here both columns pick ", compare$model[which.min(compare$cv_rmse)], ".") else paste0("Here the 10-fold column picks ", compare$model[which.min(compare$cv_rmse)], " and the holdout picks ", compare$model[which.min(compare$valid_rmse)], ". The call follows the 10-fold column.")`
+
+`r if ((bag_cv_rmse > obj1_cv) && (bag_holdout < obj1_holdout)) "Bagged trees are the example of why one split is not enough. They beat the Objective 1 equation on the holdout and lose to it on the 10-fold check." else if ((bag_cv_rmse < obj1_cv) && (bag_holdout > obj1_holdout)) "Bagged trees are the example of why one split is not enough. They beat the Objective 1 equation on the 10-fold check and lose to it on the holdout." else ""`
+
+### Regression models
+
+The regression rows are the Objective 1 equation, the full linear model, stepwise, and penalized regression. AIC, BIC, adjusted \(R^2\), and PRESS can be compared on the first three. Penalized regression is still a regression, and the only honest columns for it are the two dollar errors.
+
+Training AIC is `r formatC(step_scores$AIC, format = "f", big.mark = ",", digits = 1)` for stepwise and `r formatC(obj1_scores$AIC, format = "f", big.mark = ",", digits = 1)` for the Objective 1 equation. The 10-fold errors are `r dollars(step_cv)` and `r dollars(obj1_cv)`. `r if (step_scores$AIC < obj1_scores$AIC) "AIC prefers the stepwise equation." else "AIC prefers the Objective 1 equation."` `r if (abs(step_cv - obj1_cv) < 25) "On the 10-fold check the two errors are within $25." else paste0("On the 10-fold check the difference is ", dollars(abs(step_cv - obj1_cv)), ".")` AIC is a training score. It rewards the equation the search built. It does not answer whether a new customer is predicted more accurately.
+
+The full linear model has 10-fold error `r dollars(full_cv)`, against `r dollars(obj1_cv)` for the Objective 1 equation. Its AIC is `r formatC(full_scores$AIC, format = "f", big.mark = ",", digits = 1)`, against `r formatC(obj1_scores$AIC, format = "f", big.mark = ",", digits = 1)`. `r if (full_cv > obj1_cv && full_scores$AIC > obj1_scores$AIC) "Leaving every product in the equation does not help. AIC, which already penalizes a larger equation, is worse as well." else if (full_cv > obj1_cv) "The training score improves. The 10-fold check does not." else "Freeing every product is not, by itself, a reason to abandon the shorter equation."`
+
+Penalized regression has 10-fold error `r dollars(lasso_cv_rmse)`. `r if (lasso_cv_rmse > obj1_cv + 25) paste0("That is about ", dollars(lasso_cv_rmse - obj1_cv), " worse than the Objective 1 equation. Shrinking the full model does not beat the shorter equation already chosen for explanation.") else "It is close to the Objective 1 equation on the 10-fold check."`
+
+### Nonparametric models
+
+Nearest neighbors, bagged trees, and the random forest do not have AIC, BIC, adjusted \(R^2\), or PRESS. They are compared on the two dollar columns, against the Objective 1 equation and against each other.
+
+The random forest 10-fold error is `r dollars(forest_cv_rmse)`. Bagged trees are `r dollars(bag_cv_rmse)`. Nearest neighbors, at \(k = `r k_chosen`\), are `r dollars(knn_cv_rmse)`. The Objective 1 equation is `r dollars(obj1_cv)`. `r if (knn_cv_rmse > obj1_cv) "Nearest neighbors are more flexible than a straight line and, on this file, less accurate than the Objective 1 equation. The plot of k already showed that a neighborhood of 1 is worse and a neighborhood of 30 is worse. The chosen neighborhood did not pass the linear equation." else "Nearest neighbors beat the Objective 1 equation on the 10-fold check."`
+
+The forest and the bagged trees use the same fields. The forest restricts each split to `r forest_cv$bestTune$mtry` fields, and that restriction is why its error is not the bagged-tree error. Neither method needs the product of BMI and smoker to be written down, and neither method needs the misses to have one common spread.
+
+### Bias and variance
+
+A model that is too rigid misses real differences in charges. That miss is bias. A model that is too flexible chases this particular file and moves when the customers change. That movement is variance. The chart arranges the straight-line models from the original equation toward the full equation, then the methods that are not a straight line. That is not the order of the sections above. The original equation is at the top. The forest is at the bottom. A point farther left is a smaller dollar error. The two checks are drawn together so one split cannot decide the picture by itself.
+
+```{r flexibility-plot, fig.height=5}
+flex_order <- c(
+  "Objective 1 regression",
+  "Stepwise",
+  "Penalized regression",
+  "Full linear model",
+  "kNN",
+  "Bagged trees",
+  "Random forest"
+)
+flex <- rbind(
+  data.frame(
+    model = compare$model,
+    estimate = "10-fold CV",
+    rmse = compare$cv_rmse,
+    stringsAsFactors = FALSE
+  ),
+  data.frame(
+    model = compare$model,
+    estimate = "80/20 validation",
+    rmse = compare$valid_rmse,
+    stringsAsFactors = FALSE
+  )
+)
+flex$model <- factor(flex$model, levels = rev(flex_order))
+ggplot(flex, aes(x = rmse, y = model, color = estimate)) +
+  geom_point(size = 2.6) +
+  labs(
+    title = "Dollar error as the fit is allowed to become more flexible",
+    subtitle = "The original equation is at the top. The most flexible fit is at the bottom.",
+    x = "Typical error (RMSE, dollars)",
+    y = NULL,
+    color = NULL
+  )
+```
+
+```{r flex-note, include=FALSE}
+best_name <- compare$model[which.min(compare$cv_rmse)]
+worse_than_obj1 <- compare$model[
+  compare$cv_rmse > obj1_cv + 25 & compare$model != "Objective 1 regression"
+]
+```
+
+The low point on the 10-fold check is `r best_name`. `r if (length(worse_than_obj1)) paste0("On that check, these are worse than the original equation by more than $25: ", paste(worse_than_obj1, collapse = ", "), ". ") else ""`More flexibility is not automatically better. `r if (best_name %in% c("Random forest", "Bagged trees", "kNN")) "The gain that does show up comes from a method that can change shape, not from a longer linear equation." else "Once the prediction checks are used, a longer equation is not the winner."`
+
+### Recommendation
+
+```{r recommend}
+line_models <- c(
+  "Objective 1 regression", "Full linear model", "Stepwise", "Penalized regression"
+)
+tree_models <- c("Bagged trees", "Random forest")
+best_model <- compare$model[which.min(compare$cv_rmse)]
+best_holdout <- compare$model[which.min(compare$valid_rmse)]
+best_cv <- min(compare$cv_rmse)
+best_sd <- compare$cv_sd[which.min(compare$cv_rmse)]
+best_tree <- tree_models[which.min(compare$cv_rmse[match(tree_models, compare$model)])]
+
+# If the 10-fold winner is not a straight-line model, use it.
+# If it is, and a tree is within one fold-to-fold standard deviation, use the tree.
+# The residual plot is why: one linear error bar does not fit both groups.
+# Otherwise keep the 10-fold winner.
+if (!(best_model %in% line_models)) {
+  production <- best_model
+  reason <- "not linear"
+} else if (min(compare$cv_rmse[match(tree_models, compare$model)]) <= best_cv + best_sd) {
+  production <- best_tree
+  reason <- "tree close"
+} else {
+  production <- best_model
+  reason <- "line wins"
+}
+
+high <- valid$smoker == "no" & valid$charges > 15000
+n_high <- sum(high)
+mae_obj1_high <- mean(abs(valid$charges[high] - predict(obj1_fit, newdata = valid)[high]))
+if (production == "Random forest") {
+  prod_pred <- predict(forest_hold, newdata = valid)
+} else if (production == "Bagged trees") {
+  prod_pred <- predict(bag_hold, newdata = valid)
+} else if (production == "kNN") {
+  prod_pred <- predict(knn_hold, newdata = valid)
+} else if (production == "Stepwise") {
+  prod_pred <- predict(step_fit, newdata = valid)
+} else if (production == "Full linear model") {
+  prod_pred <- predict(full_fit, newdata = valid)
+} else if (production == "Penalized regression") {
+  prod_pred <- lasso_pred
+} else {
+  prod_pred <- predict(obj1_fit, newdata = valid)
+}
+mae_prod_high <- mean(abs(valid$charges[high] - prod_pred[high]))
+```
+
+Use **`r production`** to predict charges for a new customer. The lowest 10-fold error is `r best_model`, at `r dollars(best_cv)`. The lowest holdout error is `r best_holdout`. `r if (best_model == best_holdout) "The two checks agree." else "The two checks do not agree, so the call follows the 10-fold result."` The 10-fold error of the model we would use is `r dollars(compare$cv_rmse[compare$model == production])`. Its holdout error is `r dollars(compare$valid_rmse[compare$model == production])`.
+
+The random forest has the lowest error, and it is included here as an experimental predictor. The Objective 1 equation is the next best model on the 10-fold check if we are willing to accept that residual variance is not constant. 
+
+The **Objective 1 MLR** stays the explanation. A one-year age difference, the smoker difference at a stated BMI, and the regional level shifts are readable there, and the paired bootstrap is the range we would quote for those two average effects. They are not readable from a forest or from a neighbor average. `r if (production %in% line_models) "We would still not publish one error bar for every customer. Smoker misses are wider than non-smoker misses." else paste0("We would not put a linear equation into production as the scorer. ", production, " does not need the constant-spread assumption that the residual plot rejects.")`
+
+`r if (n_high > 0) paste0("On the holdout, ", n_high, " non-smokers have charges above $15,000. The Objective 1 equation misses that group by about ", dollars(mae_obj1_high), " on average. ", production, " misses them by about ", dollars(mae_prod_high), ". A more flexible scorer does not explain those customers. They remain a limit of every model in this comparison.") else "The holdout did not contain a separate band of high-charge non-smokers large enough to call out."`
