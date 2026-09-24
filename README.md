@@ -32,8 +32,8 @@ Due **Sunday, 27 September 2026**. One person submits: slides, 20-minute recordi
 | 3 | **EDA** | ✅ Complete | 4–6 response-vs-predictor plots; **two interaction plots**. First commit; notes below |
 | 4 | **Obj 1 — simple model** | ✅ Complete | `charges ~ bmi * smoker` on the dollar scale. Smoker gap and a 95% CI at BMI 25, 30, and 35. Not a one-predictor `charges ~ smoker` |
 | 5 | **Obj 1 — MLR** | ✅ Complete | `charges ~ age + children + bmi * smoker + region`. Include/exclude written. Sex and `smoker * region` not in the reported equation |
-| 6 | **Obj 1 — diagnostics** | 🔄 In progress | Residual plots, outliers/influence, constant variance. Raw vs square-root vs log compared; scale choice not closed |
-| 7 | **Obj 1 — answer the prompt** | 🔄 In progress | Coefficient table + at least one formal CI that addresses *association* and *does it depend on region?* |
+| 6 | **Obj 1 — diagnostics** | ✅ Complete | Residual plots, outliers/influence, constant variance. Raw vs square-root vs log compared; scale choice not closed |
+| 7 | **Obj 1 — answer the prompt** | ✅ Complete | Coefficient table + at least one formal CI that addresses *association* and *does it depend on region?* |
 | 8 | **Obj 2 — complex MLR** | ✅ Complete | Full linear model is every two-way interaction. Stepwise, both directions, by AIC. No squared BMI term |
 | 9 | **Obj 2 — nonparametric** | ✅ Complete | Scaled `caret` kNN and a `caret` random forest. 10-fold CV beside an 80/20 split, in dollars |
 | 10 | **Obj 2 — extra course models** | ✅ Complete | Lasso (`glmnet`), bagged trees, and bootstrap of the Objective 1 equation. Same folds as steps 8–9 |
