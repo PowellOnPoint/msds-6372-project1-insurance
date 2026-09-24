@@ -1,0 +1,581 @@
+---
+title: "Project 1 Objective 1: Insurance Charges"
+subtitle: "MSDS 6372: Jacob Turner"
+author: "Aaron Powell"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    df_print: kable
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width = 9,
+  fig.height = 4
+)
+library(ggplot2)
+library(dplyr)
+theme_set(theme_bw())
+options(scipen = 999)
+```
+
+```{r helpers}
+# Linear combination of coefficients, with a t interval.
+# weights is a named vector on the coefficient scale (0 for any term omitted).
+contrast <- function(model, weights) {
+  b <- coef(model)
+  L <- setNames(rep(0, length(b)), names(b))
+  unknown <- setdiff(names(weights), names(b))
+  if (length(unknown)) stop("Not in the model: ", paste(unknown, collapse = ", "))
+  L[names(weights)] <- weights
+  est <- sum(L * b)
+  se <- sqrt(drop(t(L) %*% vcov(model) %*% L))
+  df <- df.residual(model)
+  tcrit <- qt(0.975, df)
+  tstat <- est / se
+  data.frame(
+    estimate = est,
+    std_error = se,
+    lcl = est - tcrit * se,
+    ucl = est + tcrit * se,
+    t = tstat,
+    p_value = 2 * pt(-abs(tstat), df)
+  )
+}
+
+partial_f <- function(reduced, full, comparison) {
+  a <- anova(reduced, full)
+  data.frame(
+    comparison = comparison,
+    df = a$Df[2],
+    F = a$F[2],
+    p_value = a$`Pr(>F)`[2],
+    stringsAsFactors = FALSE
+  )
+}
+
+resid_summary <- function(model, scale) {
+  r <- resid(model)
+  s <- model$model$smoker
+  data.frame(
+    scale = scale,
+    sd_nonsmoker = sd(r[s == "no"]),
+    sd_smoker = sd(r[s == "yes"]),
+    sd_ratio = sd(r[s == "yes"]) / sd(r[s == "no"]),
+    skewness = mean((r - mean(r))^3) / sd(r)^3,
+    n_rstudent_gt_3 = sum(abs(rstudent(model)) > 3),
+    stringsAsFactors = FALSE
+  )
+}
+
+dollars <- function(x) {
+  paste0(
+    ifelse(x < 0, "-", ""),
+    "$",
+    formatC(round(abs(x)), format = "f", big.mark = ",", digits = 0)
+  )
+}
+
+show_p <- function(p) {
+  ifelse(
+    p < 0.001,
+    "< 0.001",
+    paste0("= ", formatC(p, format = "f", digits = 3))
+  )
+}
+```
+
+## Question
+
+An insurance provider wants to know whether customer information is associated with health-account charges, and whether any association that does exist depends on region.
+
+This notebook is Objective 1 only. Exploratory plots are in `EDA/Project1_Insurance_EDA.Rmd` and are not repeated here. Objective 2 (prediction, cross-validated RMSE in dollars) is not in this file.
+
+## Data
+
+```{r load}
+ins_raw <- read.csv("../data/insurance.csv", stringsAsFactors = TRUE)
+
+dup_rows <- ins_raw %>%
+  filter(duplicated(.) | duplicated(., fromLast = TRUE))
+dup_rows
+
+ins <- ins_raw %>%
+  distinct() %>%
+  mutate(
+    smoker = factor(smoker, levels = c("no", "yes")),
+    region = factor(region, levels = c(
+      "northeast", "northwest", "southeast", "southwest"
+    )),
+    sex = factor(sex, levels = c("female", "male"))
+  )
+
+n_raw <- nrow(ins_raw)
+n <- nrow(ins)
+n_dropped <- n_raw - n
+```
+
+The CSV is unchanged. `distinct()` drops the extra copy of one exact duplicate: a 19-year-old northwest male, non-smoker, BMI 30.59, no children, charges $1,639.56. Analysis \(n = `r n`\) (`r n_dropped` row removed from `r n_raw`). No missing values. Charges run from `r dollars(min(ins$charges))` to `r dollars(max(ins$charges))`, so `log(charges)` and `sqrt(charges)` are defined for every row.
+
+Reference levels, used in every model below: smoker `no`, region `northeast`, sex `female` (sex is only in a comparison model). BMI in this file runs from `r round(min(ins$bmi), 1)` to `r round(max(ins$bmi), 1)`. A coefficient that is a difference at BMI 0 is outside the data.
+
+## Approach
+
+The smallest model that respects the EDA is not `charges ~ smoker`. That fit would report one smoker gap. Among smokers, BMI and charges move together (\(r \approx 0.81\)); among non-smokers they essentially do not (\(r \approx 0.08\)). One smoker coefficient averages those two slopes.
+
+1. Fit `charges ~ bmi * smoker` on the dollar scale. Read the smoker gap at BMIs that occur in the data, not at BMI 0.
+2. Refit that same mean structure on `sqrt(charges)` and `log(charges)` and put the standardized residual plots next to the raw-scale plots. \(R^2\) is not used to pick a transformation. It is not comparable across different responses.
+3. Add the other customer variables on the dollar scale. Keep a term when it answers the question and the nested test supports it. Do not add a region interaction that only rewrites a near-zero slope, and do not interpret a region coefficient at BMI 0.
+4. Refit the reported formula on the square-root and log scales. Adopt a transformation only if the residual plots get better without breaking the mean structure the dollar model already got right.
+
+## Simple model: `charges ~ bmi * smoker`
+
+`bmi * smoker` expands to `bmi + smoker + bmi:smoker`. With smoker `no` as the reference:
+
+- `bmi` is the slope for non-smokers.
+- `bmi + bmi:smoker` is the slope for smokers.
+- `smokeryes` is the smoker minus non-smoker difference at BMI 0. That number is not the smoker effect.
+
+```{r simple-fit}
+simple <- lm(charges ~ bmi * smoker, data = ins)
+simple_sqrt <- lm(sqrt(charges) ~ bmi * smoker, data = ins)
+simple_log <- lm(log(charges) ~ bmi * smoker, data = ins)
+
+coef_table <- function(model) {
+  s <- summary(model)$coefficients
+  ci <- confint(model)
+  data.frame(
+    term = rownames(s),
+    estimate = s[, 1],
+    std_error = s[, 2],
+    t = s[, 3],
+    p_value = show_p(s[, 4]),
+    lcl = ci[, 1],
+    ucl = ci[, 2],
+    row.names = NULL
+  )
+}
+
+simple_coefs <- coef_table(simple)
+simple_coefs
+```
+
+```{r simple-lines, fig.height=4.2}
+ggplot(ins, aes(x = bmi, y = charges, color = smoker)) +
+  geom_point(alpha = 0.35, size = 1) +
+  geom_smooth(method = "lm", se = TRUE, formula = y ~ x) +
+  labs(
+    title = "Unadjusted fit: charges ~ bmi * smoker",
+    x = "BMI",
+    y = "Charges ($)"
+  )
+```
+
+```{r simple-slopes}
+slope_no <- contrast(simple, c(bmi = 1))
+slope_yes <- contrast(simple, c(bmi = 1, `bmi:smokeryes` = 1))
+simple_gaps <- lapply(c(25, 30, 35), function(x) {
+  cbind(
+    bmi = x,
+    contrast(simple, c(smokeryes = 1, `bmi:smokeryes` = x))
+  )
+})
+simple_gaps <- bind_rows(simple_gaps)
+simple_gaps$p_value <- show_p(simple_gaps$p_value)
+simple_gaps
+```
+
+On this unadjusted fit, mean charges rise by `r dollars(slope_no$estimate)` per BMI point among non-smokers (95% CI `r dollars(slope_no$lcl)` to `r dollars(slope_no$ucl)`). Among smokers the slope is `r dollars(slope_yes$estimate)` per BMI point (95% CI `r dollars(slope_yes$lcl)` to `r dollars(slope_yes$ucl)`).
+
+The smoker gap is the difference in those two lines. At BMI 30 it is `r dollars(simple_gaps$estimate[simple_gaps$bmi == 30])` (95% CI `r dollars(simple_gaps$lcl[simple_gaps$bmi == 30])` to `r dollars(simple_gaps$ucl[simple_gaps$bmi == 30])`). At BMI 25 it is `r dollars(simple_gaps$estimate[simple_gaps$bmi == 25])`. At BMI 35 it is `r dollars(simple_gaps$estimate[simple_gaps$bmi == 35])`. Nothing else is held fixed here. Age, children, and region are still in the residual.
+
+The negative `smokeryes` row in the coefficient table is the gap at BMI 0. It is an extrapolation. It is not used below.
+
+## Residuals of the simple model, three scales
+
+Same predictors. Three responses. Standardized residuals are plotted so the panels can sit next to each other; raw residuals would be in dollars, square-root dollars, and log dollars.
+
+```{r simple-resid-frame}
+resid_frame <- function(model, scale) {
+  data.frame(
+    scale = scale,
+    fitted = fitted(model),
+    std_resid = rstandard(model),
+    smoker = model$model$smoker,
+    stringsAsFactors = FALSE
+  )
+}
+
+simple_resid <- bind_rows(
+  resid_frame(simple, "charges"),
+  resid_frame(simple_sqrt, "sqrt(charges)"),
+  resid_frame(simple_log, "log(charges)")
+)
+simple_resid$scale <- factor(
+  simple_resid$scale,
+  levels = c("charges", "sqrt(charges)", "log(charges)")
+)
+
+simple_resid_table <- bind_rows(
+  resid_summary(simple, "charges"),
+  resid_summary(simple_sqrt, "sqrt(charges)"),
+  resid_summary(simple_log, "log(charges)")
+)
+simple_resid_table
+```
+
+```{r simple-resid-plot, fig.height=3.8}
+ggplot(simple_resid, aes(x = fitted, y = std_resid, color = smoker)) +
+  geom_point(alpha = 0.3, size = 0.7) +
+  geom_hline(yintercept = 0, linewidth = 0.3) +
+  facet_wrap(~scale, scales = "free_x") +
+  labs(
+    title = "Simple model: standardized residuals vs fitted",
+    x = "Fitted value (scale of that response)",
+    y = "Standardized residual"
+  )
+```
+
+```{r simple-qq, fig.height=3.6}
+ggplot(simple_resid, aes(sample = std_resid)) +
+  stat_qq(alpha = 0.3, size = 0.6) +
+  stat_qq_line() +
+  facet_wrap(~scale) +
+  labs(
+    title = "Simple model: normal QQ of standardized residuals",
+    x = "Theoretical quantile",
+    y = "Sample quantile"
+  )
+```
+
+`sd_ratio` is the residual SD among smokers divided by the residual SD among non-smokers. One is the constant-variance target. Skewness of the raw-scale residuals is about `r round(simple_resid_table$skewness[1], 2)`. The log residuals are closer to symmetric (skewness about `r round(simple_resid_table$skewness[3], 2)`), and that QQ plot is the straightest of the three.
+
+That is not a reason to switch yet. On the log scale the residual SD for non-smokers is about `r round(1 / simple_resid_table$sd_ratio[3], 1)` times the residual SD for smokers (`sd_ratio` about `r round(simple_resid_table$sd_ratio[3], 2)`). The square-root scale overshoots the other way (`sd_ratio` about `r round(simple_resid_table$sd_ratio[2], 2)`). The dollar scale is the closest of the three to equal spread (`sd_ratio` about `r round(simple_resid_table$sd_ratio[1], 2)`), with a heavy upper tail.
+
+The simple model still leaves age in the residual. The EDA showed a steady age slope in both smoker groups. A log response inflates leftover variation at low charges, which is mostly non-smokers. The next section puts age in before any scale is chosen.
+
+## What else belongs in the model
+
+Working mean structure, still in dollars:
+
+`charges ~ age + children + bmi * smoker + region`
+
+Sex, `smoker * region`, `age * smoker`, `age * region`, `bmi * region`, and the three-way `bmi * smoker * region` are the alternatives. Each row is a partial \(F\) test against the nested model named in the comparison.
+
+```{r mids}
+final <- lm(charges ~ age + children + bmi * smoker + region, data = ins)
+no_children <- lm(charges ~ age + bmi * smoker + region, data = ins)
+no_region <- lm(charges ~ age + children + bmi * smoker, data = ins)
+with_sex <- lm(charges ~ age + sex + children + bmi * smoker + region, data = ins)
+with_smoker_region <- lm(
+  charges ~ age + children + bmi * smoker + smoker * region,
+  data = ins
+)
+with_age_smoker <- lm(
+  charges ~ age * smoker + children + bmi * smoker + region,
+  data = ins
+)
+with_age_region <- lm(
+  charges ~ age * region + children + bmi * smoker,
+  data = ins
+)
+with_bmi_region <- lm(
+  charges ~ age + children + bmi * smoker + bmi * region,
+  data = ins
+)
+with_both_twoway <- lm(
+  charges ~ age + children + (bmi + smoker) * region + bmi:smoker,
+  data = ins
+)
+with_threeway <- lm(
+  charges ~ age + children + bmi * smoker * region,
+  data = ins
+)
+
+print_test <- function(x) {
+  x$F <- round(x$F, 2)
+  x$p_value <- show_p(x$p_value)
+  x
+}
+
+tests <- bind_rows(
+  partial_f(no_children, final, "Add children"),
+  partial_f(final, with_sex, "Add sex"),
+  partial_f(no_region, final, "Add region"),
+  partial_f(final, with_smoker_region, "Add smoker x region"),
+  partial_f(final, with_age_smoker, "Add age x smoker"),
+  partial_f(final, with_age_region, "Add age x region"),
+  partial_f(final, with_bmi_region, "Add bmi x region"),
+  partial_f(
+    with_both_twoway,
+    with_threeway,
+    "Add bmi x smoker x region, after both two-way region terms"
+  )
+)
+print_test(tests)
+```
+
+Decisions, using the rule in the approach section:
+
+- **Children stay.** The partial \(F\) rejects a model without them (\(p `r show_p(tests$p_value[tests$comparison == "Add children"])`\)).
+- **Sex stays out.** Adding sex does not reject at 5% (\(p `r show_p(tests$p_value[tests$comparison == "Add sex"])`\)). On the dollar scale, after the other terms, sex is not clearly associated with charges.
+- **Region stays, as a level shift.** The joint test rejects (\(p `r show_p(tests$p_value[tests$comparison == "Add region"])`\)).
+- **`smoker * region` stays out** (\(p `r show_p(tests$p_value[tests$comparison == "Add smoker x region"])`\)). The smoker gap does not clearly depend on region.
+- **`age * smoker` stays out** (\(p `r show_p(tests$p_value[tests$comparison == "Add age x smoker"])`\)). One age slope fits both groups. This is a dollar-scale result. It is not true of a log model, which is why the log model is checked separately below.
+- **`age * region` stays out** (\(p `r show_p(tests$p_value[tests$comparison == "Add age x region"])`\)).
+- **`bmi * region` is not added to the reported equation** even though the partial \(F\) rejects (\(p `r show_p(tests$p_value[tests$comparison == "Add bmi x region"])`\)). The non-smoker BMI slope is small. Letting it differ by region turns each region coefficient into a difference at BMI 0, which is outside the data. The southeast contrast is reported as a test in the region section, not as four new columns in the main table.
+- **The three-way stays out** (\(p `r show_p(tests$p_value[grepl("three-way|bmi x smoker x region", tests$comparison)])`\)). The BMI slope among smokers does not clearly depend on region once the two-way region terms are available.
+
+`bmi * smoker` itself is not optional. Dropping the interaction from the model that already has age, children, and region is rejected:
+
+```{r interaction-test}
+additive <- lm(charges ~ age + children + bmi + smoker + region, data = ins)
+print_test(partial_f(
+  additive, final, "bmi x smoker, after age, children, and region"
+))
+```
+
+## Reported model
+
+\[
+\text{charges} = \beta_0 + \beta_1 \text{age} + \beta_2 \text{children} + \beta_3 \text{bmi} + \beta_4 \text{smoker} + \beta_5 \text{bmi}\times\text{smoker} + \text{region} + \varepsilon
+\]
+
+Smoker reference `no`. Region reference `northeast`. Sex is not in the model.
+
+```{r final-coefs}
+final_coefs <- coef_table(final)
+final_coefs
+```
+
+\(n = `r nobs(final)`\), residual df = `r df.residual(final)`, residual SD = `r dollars(sigma(final))`. Adjusted \(R^2\) on this dollar model is `r round(summary(final)$adj.r.squared, 3)`. That \(R^2\) is not compared with the log or square-root fits.
+
+```{r final-contrasts}
+gap_at <- function(model, bmi) {
+  contrast(model, c(smokeryes = 1, `bmi:smokeryes` = bmi))
+}
+gaps <- bind_rows(lapply(c(25, 30, 35), function(x) {
+  cbind(bmi = x, gap_at(final, x))
+}))
+slope_no_f <- contrast(final, c(bmi = 1))
+slope_yes_f <- contrast(final, c(bmi = 1, `bmi:smokeryes` = 1))
+gaps_print <- gaps
+gaps_print$p_value <- show_p(gaps$p_value)
+gaps_print
+```
+
+### Smoker gap at a stated BMI
+
+Holding age, number of children, and region fixed, the difference in mean charges between smokers and non-smokers at BMI 30 is `r dollars(gaps$estimate[gaps$bmi == 30])` (95% CI `r dollars(gaps$lcl[gaps$bmi == 30])` to `r dollars(gaps$ucl[gaps$bmi == 30])`).
+
+The same contrast is `r dollars(gaps$estimate[gaps$bmi == 25])` at BMI 25 (95% CI `r dollars(gaps$lcl[gaps$bmi == 25])` to `r dollars(gaps$ucl[gaps$bmi == 25])`) and `r dollars(gaps$estimate[gaps$bmi == 35])` at BMI 35 (95% CI `r dollars(gaps$lcl[gaps$bmi == 35])` to `r dollars(gaps$ucl[gaps$bmi == 35])`). The gap widens by the smoker BMI slope for each additional BMI point. It is not one number.
+
+The unadjusted simple-model gap at BMI 30 was `r dollars(simple_gaps$estimate[simple_gaps$bmi == 30])`. Adjusting for age, children, and region does not remove it.
+
+The `smokeryes` row of the coefficient table, `r dollars(final_coefs$estimate[final_coefs$term == "smokeryes"])`, is still the gap at BMI 0. It is not this result.
+
+This is an observational contrast. Smoking was not assigned. The interval is a statement about mean charges in this file, not a causal effect of smoking and not a prediction interval for one customer.
+
+### BMI slopes
+
+Holding age, children, and region fixed, the non-smoker BMI slope is `r dollars(slope_no_f$estimate)` per BMI point (95% CI `r dollars(slope_no_f$lcl)` to `r dollars(slope_no_f$ucl)`, \(p `r show_p(slope_no_f$p_value)`\)). That interval includes zero. The simple model had reported a small positive non-smoker slope; after age, children, and region, the data do not show a BMI association among non-smokers.
+
+Among smokers the slope is `r dollars(slope_yes_f$estimate)` per BMI point (95% CI `r dollars(slope_yes_f$lcl)` to `r dollars(slope_yes_f$ucl)`). The interaction row is the difference between those two slopes: `r dollars(final_coefs$estimate[final_coefs$term == "bmi:smokeryes"])` (95% CI `r dollars(final_coefs$lcl[final_coefs$term == "bmi:smokeryes"])` to `r dollars(final_coefs$ucl[final_coefs$term == "bmi:smokeryes"])`).
+
+### Age and children
+
+Holding BMI, smoker, children, and region fixed, each additional year of age is associated with `r dollars(final_coefs$estimate[final_coefs$term == "age"])` higher mean charges (95% CI `r dollars(final_coefs$lcl[final_coefs$term == "age"])` to `r dollars(final_coefs$ucl[final_coefs$term == "age"])`). The age \(\times\) smoker test above says this slope is shared by smokers and non-smokers.
+
+Holding age, BMI, smoker, and region fixed, each additional child is associated with `r dollars(final_coefs$estimate[final_coefs$term == "children"])` higher mean charges (95% CI `r dollars(final_coefs$lcl[final_coefs$term == "children"])` to `r dollars(final_coefs$ucl[final_coefs$term == "children"])`). The line is identified mostly from 0 to 3 children. `r sum(ins$children >= 4)` customers have 4 or 5.
+
+### Region level shift
+
+Holding age, children, BMI, and smoker fixed, the southeast contrast against the northeast is `r dollars(final_coefs$estimate[final_coefs$term == "regionsoutheast"])` (95% CI `r dollars(final_coefs$lcl[final_coefs$term == "regionsoutheast"])` to `r dollars(final_coefs$ucl[final_coefs$term == "regionsoutheast"])`). Southwest is `r dollars(final_coefs$estimate[final_coefs$term == "regionsouthwest"])` (95% CI `r dollars(final_coefs$lcl[final_coefs$term == "regionsouthwest"])` to `r dollars(final_coefs$ucl[final_coefs$term == "regionsouthwest"])`). Northwest is `r dollars(final_coefs$estimate[final_coefs$term == "regionnorthwest"])`, and that interval includes zero (`r dollars(final_coefs$lcl[final_coefs$term == "regionnorthwest"])` to `r dollars(final_coefs$ucl[final_coefs$term == "regionnorthwest"])`).
+
+```{r region-composition}
+ins %>%
+  group_by(region) %>%
+  summarise(
+    n = n(),
+    mean_bmi = mean(bmi),
+    smoker_rate = mean(smoker == "yes"),
+    mean_charges = mean(charges),
+    .groups = "drop"
+  )
+```
+
+Southeast has the highest unadjusted mean charges, and also the highest mean BMI and the highest smoker rate. The adjusted southeast coefficient is negative. The unadjusted ranking is composition, not a positive region effect after BMI and smoker are in the model.
+
+## Do the associations depend on region?
+
+The provider's second question is not the same as "is the region intercept zero?"
+
+- The **smoker gap** does not clearly depend on region. Partial \(F\) for `smoker * region`: \(p `r show_p(tests$p_value[tests$comparison == "Add smoker x region"])`\).
+- The **age slope** does not clearly depend on region (\(p `r show_p(tests$p_value[tests$comparison == "Add age x region"])`\)) or on smoker (\(p `r show_p(tests$p_value[tests$comparison == "Add age x smoker"])`\)).
+- The **BMI slope among smokers** does not clearly depend on region. After `bmi * region` and `smoker * region` are both available, the three-way terms do not improve the fit (\(p `r show_p(tests$p_value[grepl("bmi x smoker x region", tests$comparison)])`\)).
+- The **BMI slope among non-smokers** does differ by region (\(p `r show_p(tests$p_value[tests$comparison == "Add bmi x region"])`\)). That slope is the small one.
+
+```{r southeast-bmi}
+se_bmi <- coef_table(with_bmi_region)
+se_bmi[se_bmi$term == "bmi:regionsoutheast", ]
+```
+
+From the model that adds `bmi * region`, the southeast non-smoker BMI slope is `r dollars(se_bmi$estimate[se_bmi$term == "bmi:regionsoutheast"])` per BMI point relative to the northeast (95% CI `r dollars(se_bmi$lcl[se_bmi$term == "bmi:regionsoutheast"])` to `r dollars(se_bmi$ucl[se_bmi$term == "bmi:regionsoutheast"])`). Northwest and southwest are not clearly different from the northeast on that term (both \(p > 0.20\) in that fit). A negative difference means the southeast non-smoker slope is lower than the northeast slope. Both slopes are small next to the smoker slope of about `r dollars(slope_yes_f$estimate)` per BMI point.
+
+So: charges are associated with smoker, with BMI among smokers, with age, with children, and with region as a level shift (southeast and southwest lower than northeast after adjustment). Those associations do not clearly change with region, except the weak non-smoker BMI slope, which is lower in the southeast.
+
+## Why the reported model stays in dollars
+
+The simple-model QQ plot favored `log(charges)`. This section refits the reported formula on all three scales and does not adopt the log.
+
+```{r scale-mlr}
+final_sqrt <- lm(sqrt(charges) ~ age + children + bmi * smoker + region, data = ins)
+final_log <- lm(log(charges) ~ age + children + bmi * smoker + region, data = ins)
+log_age_smoker <- lm(
+  log(charges) ~ age * smoker + children + bmi * smoker + region,
+  data = ins
+)
+
+mlr_resid_table <- bind_rows(
+  resid_summary(final, "charges"),
+  resid_summary(final_sqrt, "sqrt(charges)"),
+  resid_summary(final_log, "log(charges)"),
+  resid_summary(log_age_smoker, "log(charges) + age x smoker")
+)
+mlr_resid_table
+
+mlr_resid <- bind_rows(
+  resid_frame(final, "charges"),
+  resid_frame(final_sqrt, "sqrt(charges)"),
+  resid_frame(final_log, "log(charges)")
+)
+mlr_resid$scale <- factor(
+  mlr_resid$scale,
+  levels = c("charges", "sqrt(charges)", "log(charges)")
+)
+```
+
+```{r mlr-resid-plot, fig.height=3.8}
+ggplot(mlr_resid, aes(x = fitted, y = std_resid, color = smoker)) +
+  geom_point(alpha = 0.3, size = 0.7) +
+  geom_hline(yintercept = 0, linewidth = 0.3) +
+  facet_wrap(~scale, scales = "free_x") +
+  labs(
+    title = "Reported formula on three scales",
+    x = "Fitted value (scale of that response)",
+    y = "Standardized residual"
+  )
+```
+
+```{r mlr-qq, fig.height=3.6}
+ggplot(mlr_resid, aes(sample = std_resid)) +
+  stat_qq(alpha = 0.3, size = 0.6) +
+  stat_qq_line() +
+  facet_wrap(~scale) +
+  labs(
+    title = "Reported formula: normal QQ plots",
+    x = "Theoretical quantile",
+    y = "Sample quantile"
+  )
+```
+
+```{r log-age-check, fig.height=4}
+log_age <- data.frame(
+  age = final_log$model$age,
+  std_resid = rstandard(final_log),
+  smoker = final_log$model$smoker
+)
+ggplot(log_age, aes(x = age, y = std_resid, color = smoker)) +
+  geom_point(alpha = 0.35, size = 0.8) +
+  geom_hline(yintercept = 0, linewidth = 0.3) +
+  geom_smooth(method = "lm", se = FALSE, formula = y ~ x) +
+  labs(
+    title = "Log model with a common age slope: residuals vs age",
+    x = "Age",
+    y = "Standardized residual"
+  )
+```
+
+```{r log-age-tests}
+p_age_dollar <- anova(final, with_age_smoker)[["Pr(>F)"]][2]
+p_age_log <- anova(final_log, log_age_smoker)[["Pr(>F)"]][2]
+print_test(partial_f(final, with_age_smoker, "age x smoker on the dollar scale"))
+print_test(partial_f(final_log, log_age_smoker, "age x smoker on the log scale"))
+```
+
+On the dollar scale, residual correlation with age is already about zero inside each smoker group, and `age * smoker` does nothing (\(p `r show_p(p_age_dollar)`\)). The same interaction on the log scale is not optional (\(p `r show_p(p_age_log)`\)). A common percent-per-year is too steep for smokers, who sit at higher charges, so smoker residuals fall with age. The plot above is that pattern. Adding `age * smoker` on the log scale removes the trend and makes the residual SDs unequal again (`sd_ratio` about `r round(mlr_resid_table$sd_ratio[4], 2)` in the table, against about `r round(mlr_resid_table$sd_ratio[3], 2)` before the interaction).
+
+Square root sits between the two scales and still leaves the upper tail. None of the three QQ plots is a straight line once age, children, and region are in the model. The tail is a cloud of non-smokers with large positive residuals, visible on every panel.
+
+The dollar formula is the one whose mean structure the tests support: one age slope, a smoker gap that depends on BMI, a region level shift, no smoker \(\times\) region term. The log formula only looks better on variance if we leave in an age slope the residuals reject. Objective 1 therefore reports the dollar model. The intervals above use the ordinary least-squares standard errors. Residual spread is not constant (`sd_ratio` about `r round(mlr_resid_table$sd_ratio[1], 2)` on the reported model) and the upper tail is heavy, so those intervals are approximate. The smoker gap at BMI 30 is many standard errors from zero. That association is not an artifact of the last decimal of the standard error.
+
+\(R^2\) is lower on the log scale than on the dollar scale for the simple model. That comparison is not used. Changing the response changes \(R^2\).
+
+## Diagnostics of the reported model
+
+```{r base-diagnostics, fig.height=7, fig.width=7}
+par(mfrow = c(2, 2))
+plot(final)
+```
+
+```{r resid-vs-predictors, fig.height=4}
+final_aug <- data.frame(
+  std_resid = rstandard(final),
+  fitted = fitted(final),
+  bmi = final$model$bmi,
+  age = final$model$age,
+  smoker = final$model$smoker
+)
+ggplot(final_aug, aes(x = bmi, y = std_resid, color = smoker)) +
+  geom_point(alpha = 0.35, size = 0.8) +
+  geom_hline(yintercept = 0, linewidth = 0.3) +
+  geom_smooth(method = "loess", se = FALSE, formula = y ~ x, linewidth = 0.6) +
+  labs(
+    title = "Reported model: standardized residuals vs BMI",
+    x = "BMI",
+    y = "Standardized residual"
+  )
+```
+
+```{r cooks}
+cooks <- cooks.distance(final)
+cook_cut <- 4 / nobs(final)
+data.frame(
+  max_cook = max(cooks),
+  cutoff_4_over_n = cook_cut,
+  n_above_cutoff = sum(cooks > cook_cut),
+  n_rstudent_gt_3 = sum(abs(rstudent(final)) > 3)
+)
+```
+
+```{r cooks-plot, fig.height=3.6}
+ggplot(data.frame(i = seq_along(cooks), cook = cooks), aes(x = i, y = cook)) +
+  geom_point(size = 0.7, alpha = 0.5) +
+  geom_hline(yintercept = cook_cut, linetype = 2) +
+  labs(
+    title = "Cook's distance for the reported model",
+    x = "Row in the analysis file",
+    y = "Cook's distance"
+  )
+```
+
+The residual-versus-fitted plot shows three clouds, not a single band: the main non-smoker cloud, a smoker cloud, and a set of non-smokers whose charges land in the smoker range. `r sum(abs(rstudent(final)) > 3)` rows have absolute studentized residual greater than 3. They are almost all non-smokers. Nothing in the file (age, BMI, children, sex, region) accounts for that upper band. They are not removed. There is no data-error reason, and the largest Cook's distance is `r round(max(cooks), 3)`, not a point that dominates the fit. The dashed line on the Cook's plot is \(4/n \approx `r round(cook_cut, 4)`\). With this \(n\) that rule flags `r sum(cooks > cook_cut)` rows. It is a screen, not a deletion rule.
+
+Residuals versus BMI show no leftover straight line inside each smoker group; those slopes are in the model. A bend at the highest BMIs is visible. A polynomial in BMI among smokers is left for Objective 2. It is a prediction question, not something this model needs in order to state the smoker gap.
+
+Linearity in age is adequate on this scale: the age \(\times\) smoker term was not supported, and residuals do not trend with age the way they do on the log scale. Independence is an assumption we cannot check. Each row is one customer after the duplicate was removed. There is no household or plan identifier. The customers are not a random sample of the United States. The four regions are the four regions in the file.
+
+## Takeaway
+
+Customer variables are associated with charges. At BMI 30, holding age, children, and region fixed, smokers' mean charges are about `r dollars(gaps$estimate[gaps$bmi == 30])` higher than non-smokers' (95% CI `r dollars(gaps$lcl[gaps$bmi == 30])` to `r dollars(gaps$ucl[gaps$bmi == 30])`), and that gap is wider at higher BMI because the smoker BMI slope is about `r dollars(slope_yes_f$estimate)` per point while the non-smoker BMI slope is not clearly different from zero. Age adds about `r dollars(final_coefs$estimate[final_coefs$term == "age"])` per year in both groups. Each child adds about `r dollars(final_coefs$estimate[final_coefs$term == "children"])`. Sex is not clearly associated with charges after these terms.
+
+Region is associated with the level of charges: after adjustment, southeast and southwest are lower than the northeast by about $1,200. The smoker gap, the age slope, and the BMI slope among smokers do not clearly depend on region. The exception is the small non-smoker BMI slope, which is lower in the southeast than in the northeast.
+
+The dollar residuals are right-skewed, somewhat wider for smokers, and they contain a band of high-charge non-smokers that this linear model does not explain. `log(charges)` was fit and compared. It was not adopted, because a common log-age slope is rejected by the residuals, and fixing that slope undoes the variance gain. Objective 2 can try a more flexible mean (a BMI polynomial, a tree) and must report error in dollars. It should not replace this model just because a log \(R^2\) looks different.

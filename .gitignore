@@ -10,6 +10,7 @@
 *_cache/
 .quarto/
 EDA/*_files/
+Objective_1/*_files/
 *.tmp
 *.swp
 .env
