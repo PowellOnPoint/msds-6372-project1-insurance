@@ -30,10 +30,10 @@ Due **9 February**. One person submits: slides, 20-minute recording, R notebook.
 | 1 | **Load & codebook** | ✅ Complete | both | `insurance.csv` (\(n=1338\), 7 columns) in `data/`; variable table in the EDA |
 | 2 | **Clean** | ✅ Complete | both | No missingness. One exact duplicate dropped (`distinct()`); \(n=1337\). Factors recoded. Stop cleaning here |
 | 3 | **EDA** | ✅ Complete | both | 4–6 response-vs-predictor plots; **two interaction plots**. First commit; notes below |
-| 4 | **Obj 1 — SLR** | ⬜ Not started | | Fit `charges ~ smoker` (or `~ bmi`). Interpret slope/mean gap **and** a 95% CI |
-| 5 | **Obj 1 — MLR** | ⬜ Not started | | Interpretable MLR that includes **region** (main effect and/or `smoker * region`) and `bmi * smoker`. Write include/exclude |
-| 6 | **Obj 1 — diagnostics** | ⬜ Not started | | Residual plots, outliers/influence, constant variance. Try `log(charges)` only if the raw-scale MLR fails assumptions |
-| 7 | **Obj 1 — answer the prompt** | ⬜ Not started | | Coefficient table + at least one formal CI that addresses *association* and *does it depend on region?* |
+| 4 | **Obj 1 — simple model** | ✅ Complete | Aaron | `charges ~ bmi * smoker` on the dollar scale. Smoker gap and a 95% CI at BMI 25, 30, and 35. Not a one-predictor `charges ~ smoker` |
+| 5 | **Obj 1 — MLR** | ✅ Complete | Aaron | `charges ~ age + children + bmi * smoker + region`. Include/exclude written. Sex and `smoker * region` not in the reported equation |
+| 6 | **Obj 1 — diagnostics** | 🔄 In progress | Aaron | Residual plots, outliers/influence, constant variance. Raw vs square-root vs log compared; scale choice not closed |
+| 7 | **Obj 1 — answer the prompt** | 🔄 In progress | Aaron | Coefficient table + at least one formal CI that addresses *association* and *does it depend on region?* |
 | 8 | **Obj 2 — complex MLR** | ⬜ Not started | | Prompt-required second MLR: extra interactions, polynomials, or log-\(y\). Not for interpretation |
 | 9 | **Obj 2 — nonparametric** | ⬜ Not started | | Prompt-required `caret` kNN **or** tree **or** RF |
 | 10 | **Obj 2 — extra course models** | ⬜ Optional | | glmnet, a second \(k\), bagged tree, etc. Same CV protocol as 8–9 |
@@ -54,7 +54,7 @@ Raw file \(n=1338\), one exact duplicate dropped (19-year-old northwest male, no
 - **Region × smoker** — the “depend on region?” question; Southeast smokers highest; region is mostly a level shift
 - Age slopes in both smoker groups; `log(charges)` is nearly symmetric if diagnostics force a transform
 
-Next: step 4 (SLR), then step 5 (MLR). Not more EDA.
+Next: finish step 6 (diagnostics) and step 7 (the prompt answer). The Objective 1 notebook is local and is not in this repo yet. Objective 2 has not started. Not more EDA.
 
 ## Repository Structure
 
