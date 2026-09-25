@@ -48,7 +48,5 @@ summary(fit_no_region2)
 anova(fit_no_region2, fit2)
 #There is strong evidence that the relationship between BMI and insurance charges differs by smoking status.
 
-
-
 mlr <- lm(log(charges) ~ age + sex + children + bmi * smoker + region * smoker, data = insurance)
 summary(mlr)

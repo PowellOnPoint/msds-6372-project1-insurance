@@ -1,0 +1,220 @@
+---
+title: "Objective 2"
+author: "Bui, Andy"
+date: "2026-09-25"
+output:
+  html_document:
+    code_folding: hide       
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+```{r obj2_data}
+library(caret)
+library(dplyr)
+library(boot)
+
+#Reading Data
+ins <- read.csv("../data/insurance.csv")
+
+#Data Cleanup
+ins <- ins %>% distinct() %>% mutate(smoker = factor(smoker, levels = c("no", "yes"))
+                                     , region = factor(region, levels = c("northeast", "northwest", "southeast", "southwest")),
+                                     sex = factor(sex, levels = c("female", "male")))
+
+set.seed(1234)
+
+#Splitting Data 80/20
+trainIndices = sample(seq(1:length(ins$age)), round(.8 * length(ins$age)))
+train = ins[trainIndices, ]
+test  = ins[-trainIndices, ]
+
+
+#Ensuring data is split
+nrow(train)
+nrow(test)
+```
+
+## Model 1
+
+The baseline predictive model is the final MLR developed in Objective 1. This model will be used as a benchmark to determine whether additional\
+model complexity improves out of sample prediction.
+
+```{r Obj2_model1}
+#Baseline model from Objective 1
+model1 <- lm( charges ~ age + children + bmi * smoker + region, data = train)
+
+summary(model1)
+```
+### Bootstrap Model 1
+```{r Obj2_model1_bs}
+library(lmboot)
+#Baseline model from Objective 1
+set.seed(1234)
+
+#Paired Bootstrap
+boot.model1 <- paired.boot(charges ~ age + children + bmi * smoker + region,data = train,B = 2000,seed = 1234)
+
+#Bootstrap Intervals
+t(apply(boot.model1$bootEstParam, 2, quantile,probs = c(.025, .975)))
+
+#Traditional Intervals
+confint(model1)
+```
+
+
+
+## More Complex Model
+This next model focuses more heavily on prediction than interpretation. Residual analysis from Objective 1 suggested some curvature at higher BMI values. \
+Objective 1 also found evidence that the BMI relationship may differ by region (\(BMI \times Region,\ p=0.011\)). A larger candidate MLR is \
+considered that includes additional interactions and a quadratic BMI term. The following model will use feature selection  to reduce the candidate model.
+
+```{r Obj2_model2_complexity}
+full_model <- lm(charges ~ age + sex + children + region + smoker * (bmi + I(bmi^2)) + bmi:region +smoker:region, data = train)
+
+summary(full_model)
+```
+
+Compared with Model 1, we're allowing:\
+\(BMI^2\)
+\
+for curvature,\
+\(BMI * Region\)
+\
+for different BMI relationships across regions,\
+\(Smoker * Region\)
+\
+for different smoking relationships across regions.
+We also allow sex back into the candidate model because Objective 2 is about prediction rather than significance alone.
+
+
+## Feature Selection
+Feature selection using backward stepwise selection
+
+```{r Obj2_model2_featureselection}
+model2 <- step(full_model, direction = "backward", trace = 0)
+
+summary(model2)
+```
+Backward stepwise selection retained age, sex, children, region, smoking status, and a quadratic BMI relationship that interacts with smoking status. The BMI*Region\
+and smoke*region interactions were removed. This suggests that the added predictive complexity is primarily associated with allowing the BMI charge relationship to curve\ differently for smokers and non smokers
+
+### Bootstrap for Model 2
+```{r Obj2_model2_BS}
+boot.model2 <- paired.boot(formula(model2),data = train,B = 2000,seed = 1234)
+
+# Bootstrap confidence intervals
+t(apply(boot.model2$bootEstParam, 2, quantile, probs = c(.025, .975)))
+
+# Traditional confidence intervals
+confint(model2)
+```
+Paired-bootstrap intervals and traditional intervals agree very closely for some coefficients, especially age and children.\
+That suggests those effects are fairly stable. The more complicated BMI/smoking terms show noticeably more uncertainty under the paired bootstrap.\
+Model 2 contains \(BMI\), \(BMI^2\), and interactions involving both, so those coefficients are more intertwined.
+
+Paired bootstrap confidence intervals were compared with traditional regression confidence intervals for the feature selected MLR. The intervals were similar for several predictors, age, children, and region. Greater differences were observed for the BMI and smoking related terms, showing additional uncertainty in the more complex polynomial and interaction structure. The bootstrap and traditional intervals both contained zero for sex, northwest region, BMI, BMI^2, and the smoker*BMI-squared interaction. These terms were retained by the AIC feature selection procedure where applicable. Since Objective 2 focuses on prediction, final model selection will be based on prediction error rather than individual coefficient significance.
+
+## Model 3 - KNN
+```{r Obj2_model3_knn}
+set.seed(1234)
+
+# 5 fold cross validation
+knn_control <- trainControl(method = "cv", number = 5)
+
+# Values of k to test
+knn_grid <- expand.grid(k = 1:30)
+
+# KNN model
+model3 <- train(charges ~ age + sex + bmi + children + smoker + region,data = train, method = "knn", preProcess = c("center", "scale"), tuneGrid = knn_grid, trControl = knn_control,metric = "RMSE")
+
+model3
+#Locating optimal k
+model3$bestTune
+model3$results
+plot(model3)
+```
+
+KNN was tuned using 5 fold cross validation on the training data. Values of k from 1 through 30 were considered, and lower RMSE was the requirement. The smallest crossv alidated RMSE was 5688.61 at k = 6, so six nearest neighbors were selected for the final KNN model. Smaller values of k produced a more variable model, while larger values increasingly smoothed predictions and resulted in higher cross validation error.
+
+## Final Model Comparison
+```{r Obj2_test_predictions}
+
+# Model 1 predictions
+pred1 <- predict(
+  model1,
+  newdata = test
+)
+
+# Model 2 predictions
+pred2 <- predict(
+  model2,
+  newdata = test
+)
+
+# Model 3 KNN predictions
+pred3 <- predict(
+  model3,
+  newdata = test
+)
+```
+
+
+
+
+```{r Obj2_model_comparison}
+
+# Model 1
+results1 <- postResample(
+  pred = pred1,
+  obs = test$charges
+)
+
+# Model 2
+results2 <- postResample(
+  pred = pred2,
+  obs = test$charges
+)
+
+# Model 3
+results3 <- postResample(
+  pred = pred3,
+  obs = test$charges
+)
+
+comparison <- data.frame(
+  Model = c(
+    "Objective 1 MLR",
+    "Feature Selected MLR",
+    "KNN"
+  ),
+  
+  RMSE = c(
+    results1["RMSE"],
+    results2["RMSE"],
+    results3["RMSE"]
+  ),
+  
+  MAE = c(
+    results1["MAE"],
+    results2["MAE"],
+    results3["MAE"]
+  ),
+  
+  R_Squared = c(
+    results1["Rsquared"],
+    results2["Rsquared"],
+    results3["Rsquared"]
+  )
+)
+
+comparison
+```
+
+Three predictive models were evaluated using the same 20% holdout test set: the Objective 1 MLR, a feature selected MLR with additional polynomial and interaction terms, and KNN. The feature selected MLR produced the lowest test RMSE ($4,467.13) and MAE ($2,734.23), as well as the highest test R^2 (0.8634). The baseline Objective 1 MLR performed similarly but had slightly larger prediction errors, with an RMSE of $4,552.52. KNN, tuned to k=6 using five fold cross validation, produced the largest test errors, with an RMSE of $5,294.39. Based on test sample prediction performance, the feature selected MLR would be the optimal predictive model to use
+
+
