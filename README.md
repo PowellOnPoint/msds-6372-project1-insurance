@@ -39,7 +39,7 @@ Due **Sunday, 27 September 2026**. One person submits: slides, 20-minute recordi
 | 10 | **Obj 2 — extra course models** | ✅ Complete | Lasso (`glmnet`), bagged trees, and bootstrap of the Objective 1 equation. Same folds as steps 8–9 |
 | 11 | **Obj 2 — comparison table** | ✅ Complete | One table: AIC, BIC, adjusted \(R^2\), PRESS where defined, plus 10-fold and 80/20 RMSE in dollars. Random forest is the lowest-error predictor |
 | 12 | **Final remarks** | ✅ Complete | In the executive summary: four regions in this file, not a national sample; not causal; high-charge non-smokers unexplained |
-| 13 | **Slides + 20-min talk** | Slides drafted | `Executive_Summary/Project1_Insurance_Presentation.pptx`. Video not recorded. Both present |
+| 13 | **Slides + 20-min talk** | Slides ready | 15-slide deck with speaker notes: `Executive_Summary/Project1_Insurance_Presentation.pptx`. Video not recorded. Both present |
 | 14 | **Knit notebook + appendix** | ✅ Complete | `Executive_Summary/Project1_Insurance_Executive_Summary.Rmd` and the knitted HTML. Working papers in `EDA/`, `Objective_1/`, and `Objective_2/` stay |
 | 15 | **Peer review (Canvas)** | ⬜ Not started | Individual; not in this repo |
 
@@ -54,7 +54,7 @@ Raw file \(n=1338\), one exact duplicate dropped (19-year-old northwest male, no
 - **Region × smoker** — the “depend on region?” question; Southeast smokers highest; region is mostly a level shift
 - Age slopes in both smoker groups; `log(charges)` is nearly symmetric if diagnostics force a transform
 
-The submission brief is `Executive_Summary/Project1_Insurance_Executive_Summary.Rmd` (knitted HTML beside it). The slides are `Executive_Summary/Project1_Insurance_Presentation.pptx`. The earlier notebooks stay as the working papers. Next is the video. Not more EDA.
+The submission brief is `Executive_Summary/Project1_Insurance_Executive_Summary.Rmd` (knitted HTML beside it). The submission deck is `Executive_Summary/Project1_Insurance_Presentation.pptx`. The earlier notebooks stay as the working papers. Next is the video. Not more EDA.
 
 ## Repository Structure
 
