@@ -29,9 +29,9 @@ ins <- ins %>% distinct() %>% mutate(smoker = factor(smoker, levels = c("no", "y
 set.seed(1234)
 
 #Splitting Data 80/20
-trainIndices = sample(seq(1:length(ins$age)), round(.8 * length(ins$age)))
-train = ins[trainIndices, ]
-test  = ins[-trainIndices, ]
+trainIndices <- createDataPartition(ins$charges, p = 0.8, list = FALSE)
+train <- ins[trainIndices, ]
+test  <- ins[-trainIndices, ]
 
 
 #Ensuring data is split
@@ -65,17 +65,7 @@ t(apply(boot.model1$bootEstParam, 2, quantile,probs = c(.025, .975)))
 #Traditional Intervals
 confint(model1)
 ```
-## Linear Vs Quadratic
-```{r Obj2_model2_LMvsQM}
-# Linear BMI model
-model2_linear <- lm(charges ~ age + sex + children + region + smoker * bmi, data = train)
 
-# Quadratic BMI model
-model2_quad <- lm(charges ~ age + sex + children + region + smoker * (bmi + I(bmi^2)), data = train)
-
-# Partial F-test
-anova(model2_linear, model2_quad)
-```
 
 
 ## More Complex Model
@@ -134,7 +124,7 @@ Paired bootstrap confidence intervals were compared with traditional regression 
 set.seed(1234)
 
 # 5 fold cross validation
-knn_control <- trainControl(method = "cv", number = 5)
+knn_control <- trainControl(method = "cv", number = 10)
 
 # Values of k to test
 knn_grid <- expand.grid(k = 1:30)

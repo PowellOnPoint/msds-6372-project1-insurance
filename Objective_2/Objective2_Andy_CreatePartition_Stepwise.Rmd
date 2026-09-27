@@ -29,9 +29,9 @@ ins <- ins %>% distinct() %>% mutate(smoker = factor(smoker, levels = c("no", "y
 set.seed(1234)
 
 #Splitting Data 80/20
-trainIndices = sample(seq(1:length(ins$age)), round(.8 * length(ins$age)))
-train = ins[trainIndices, ]
-test  = ins[-trainIndices, ]
+trainIndices <- createDataPartition(ins$charges, p = 0.8, list = FALSE)
+train <- ins[trainIndices, ]
+test  <- ins[-trainIndices, ]
 
 
 #Ensuring data is split
@@ -65,17 +65,7 @@ t(apply(boot.model1$bootEstParam, 2, quantile,probs = c(.025, .975)))
 #Traditional Intervals
 confint(model1)
 ```
-## Linear Vs Quadratic
-```{r Obj2_model2_LMvsQM}
-# Linear BMI model
-model2_linear <- lm(charges ~ age + sex + children + region + smoker * bmi, data = train)
 
-# Quadratic BMI model
-model2_quad <- lm(charges ~ age + sex + children + region + smoker * (bmi + I(bmi^2)), data = train)
-
-# Partial F-test
-anova(model2_linear, model2_quad)
-```
 
 
 ## More Complex Model
@@ -106,7 +96,7 @@ We also allow sex back into the candidate model because Objective 2 is about pre
 Feature selection using backward stepwise selection
 
 ```{r Obj2_model2_featureselection}
-model2 <- step(full_model, direction = "backward", trace = 0)
+model2 <- step(full_model, direction = "both", trace = 0)
 
 summary(model2)
 ```
