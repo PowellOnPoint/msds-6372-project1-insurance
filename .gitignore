@@ -12,6 +12,7 @@
 EDA/*_files/
 Objective_1/*_files/
 Objective_2/*_files/
+Executive_Summary/*_files/
 *.tmp
 *.swp
 .env

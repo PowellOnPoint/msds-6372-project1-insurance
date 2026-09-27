@@ -1,0 +1,1734 @@
+---
+title: "Health Care charges"
+subtitle: "What is associated with the bill, and how we would price the next customer"
+author: "Aaron Powell and Thuan-Andy Bui"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    toc_depth: 3
+    df_print: kable
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width = 9,
+  fig.height = 4.4,
+  cache.path = "/tmp/p1-insurance-exec-cache/"
+)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(gridExtra)
+library(caret)
+library(glmnet)
+library(lmboot)
+theme_set(theme_bw(base_size = 12))
+options(scipen = 999)
+dir.create("figures", showWarnings = FALSE)
+smoker_colors <- c("no" = "#5C6B73", "yes" = "#9B2335")
+```
+
+```{r helpers}
+# Dollar RMSE for one set of predictions.
+rmse <- function(obs, pred) {
+  sqrt(mean((obs - pred)^2))
+}
+
+# Round a number of dollars for the prose.
+dollars <- function(x) {
+  out <- rep("—", length(x))
+  ok <- !is.na(x)
+  out[ok] <- paste0(
+    ifelse(x[ok] < 0, "-", ""),
+    "$",
+    formatC(round(abs(x[ok])), format = "f", big.mark = ",", digits = 0)
+  )
+  out
+}
+
+pct <- function(x) {
+  paste0(formatC(round(100 * x, 1), format = "f", digits = 1), "%")
+}
+
+times_word <- function(x) {
+  formatC(round(x, 1), format = "f", digits = 1)
+}
+
+range_words <- function(lo, hi) paste(dollars(lo), "to", dollars(hi))
+
+show_p <- function(p) {
+  ifelse(
+    is.na(p),
+    "—",
+    ifelse(p < 0.001, "< 0.001", paste0("= ", formatC(p, format = "f", digits = 3)))
+  )
+}
+
+# Linear combination of coefficients, with a t interval.
+# weights is a named vector on the coefficient scale.
+contrast <- function(model, weights) {
+  b <- coef(model)
+  L <- setNames(rep(0, length(b)), names(b))
+  unknown <- setdiff(names(weights), names(b))
+  if (length(unknown)) stop("Not in the model: ", paste(unknown, collapse = ", "))
+  L[names(weights)] <- weights
+  est <- sum(L * b)
+  se <- sqrt(drop(t(L) %*% vcov(model) %*% L))
+  df <- df.residual(model)
+  tcrit <- qt(0.975, df)
+  tstat <- est / se
+  data.frame(
+    estimate = est,
+    std_error = se,
+    lcl = est - tcrit * se,
+    ucl = est + tcrit * se,
+    t = tstat,
+    p_value = 2 * pt(-abs(tstat), df)
+  )
+}
+
+partial_f <- function(reduced, full, comparison) {
+  a <- anova(reduced, full)
+  data.frame(
+    comparison = comparison,
+    df = a$Df[2],
+    F = a$F[2],
+    p_value = a$`Pr(>F)`[2],
+    stringsAsFactors = FALSE
+  )
+}
+
+# AIC, BIC, adjusted R-squared, and PRESS for one lm fit.
+# PRESS sums squared leave-one-out errors. It is not a dollar miss.
+linear_scores <- function(fit) {
+  data.frame(
+    AIC = AIC(fit),
+    BIC = BIC(fit),
+    adj_r2 = summary(fit)$adj.r.squared,
+    PRESS = sum((residuals(fit) / (1 - hatvalues(fit)))^2)
+  )
+}
+
+resid_summary <- function(model, scale) {
+  r <- resid(model)
+  s <- model$model$smoker
+  data.frame(
+    scale = scale,
+    sd_nonsmoker = sd(r[s == "no"]),
+    sd_smoker = sd(r[s == "yes"]),
+    sd_ratio = sd(r[s == "yes"]) / sd(r[s == "no"]),
+    skewness = mean((r - mean(r))^3) / sd(r)^3,
+    n_rstudent_gt_3 = sum(abs(rstudent(model)) > 3),
+    stringsAsFactors = FALSE
+  )
+}
+
+sigma_ci <- function(x) {
+  n <- length(x)
+  s2 <- var(x)
+  lower <- sqrt((n - 1) * s2 / qchisq(0.05 / 2, n - 1, lower.tail = FALSE))
+  upper <- sqrt((n - 1) * s2 / qchisq(0.05 / 2, n - 1, lower.tail = TRUE))
+  c(lower, upper)
+}
+```
+
+This notebook is a supplement to *Health Care Charges* executive brief. The outcome of our analysis may be used to explain a customer bill and predict future health care charges. 
+
+Technical analysis is provided in EDA notebooks as well as Objectives 1 & 2 notebooks located in https://github.com/PowellOnPoint/msds-6372-project1-insurance. The code that produces every figure is in this file, folded by default, and repeated in the appendix.
+
+```{r load}
+ins_raw <- read.csv("../data/insurance.csv", stringsAsFactors = TRUE)
+dup_rows <- ins_raw %>%
+  filter(duplicated(.) | duplicated(., fromLast = TRUE))
+ins <- ins_raw %>%
+  distinct() %>%
+  mutate(
+    smoker = factor(smoker, levels = c("no", "yes")),
+    region = factor(region, levels = c(
+      "northeast", "northwest", "southeast", "southwest"
+    )),
+    sex = factor(sex, levels = c("female", "male"))
+  )
+n_raw <- nrow(ins_raw)
+n <- nrow(ins)
+n_dropped <- n_raw - n
+n_miss <- sum(is.na(ins_raw))
+mean_charges <- mean(ins$charges)
+median_charges <- median(ins$charges)
+```
+
+```{r book}
+smoker_book <- ins %>%
+  group_by(smoker) %>%
+  summarise(
+    n = n(),
+    mean_charges = mean(charges),
+    median_charges = median(charges),
+    sd_charges = sd(charges),
+    .groups = "drop"
+  )
+mean_yes <- smoker_book$mean_charges[smoker_book$smoker == "yes"]
+mean_no <- smoker_book$mean_charges[smoker_book$smoker == "no"]
+median_yes <- smoker_book$median_charges[smoker_book$smoker == "yes"]
+median_no <- smoker_book$median_charges[smoker_book$smoker == "no"]
+n_yes <- smoker_book$n[smoker_book$smoker == "yes"]
+n_no <- smoker_book$n[smoker_book$smoker == "no"]
+
+age_cor <- ins %>%
+  group_by(smoker) %>%
+  summarise(r = cor(age, charges), .groups = "drop")
+bmi_cor <- ins %>%
+  group_by(smoker) %>%
+  summarise(r = cor(bmi, charges), .groups = "drop")
+r_age_yes <- age_cor$r[age_cor$smoker == "yes"]
+r_age_no <- age_cor$r[age_cor$smoker == "no"]
+r_bmi_yes <- bmi_cor$r[bmi_cor$smoker == "yes"]
+r_bmi_no <- bmi_cor$r[bmi_cor$smoker == "no"]
+
+region_smoker <- ins %>%
+  group_by(region, smoker) %>%
+  summarise(
+    n = n(),
+    mean_charges = mean(charges),
+    mean_bmi = mean(bmi),
+    .groups = "drop"
+  )
+region_mix <- ins %>%
+  group_by(region) %>%
+  summarise(
+    n = n(),
+    mean_bmi = mean(bmi),
+    smoker_rate = mean(smoker == "yes"),
+    mean_charges = mean(charges),
+    .groups = "drop"
+  )
+
+num_summary <- ins %>%
+  select(age, bmi, children, charges) %>%
+  pivot_longer(everything()) %>%
+  group_by(name) %>%
+  summarise(
+    n = n(),
+    mean = mean(value),
+    sd = sd(value),
+    min = min(value),
+    q25 = quantile(value, 0.25),
+    median = median(value),
+    q75 = quantile(value, 0.75),
+    max = max(value),
+    .groups = "drop"
+  )
+```
+
+```{r explain, cache=TRUE, cache.lazy=FALSE}
+# The equation we would explain. Sex is not in it.
+# Smoker reference is no. Region reference is northeast.
+explain_formula <- charges ~ age + children + bmi * smoker + region
+explain <- lm(explain_formula, data = ins)
+
+no_children <- lm(charges ~ age + bmi * smoker + region, data = ins)
+no_region <- lm(charges ~ age + children + bmi * smoker, data = ins)
+with_sex <- lm(charges ~ age + sex + children + bmi * smoker + region, data = ins)
+with_smoker_region <- lm(
+  charges ~ age + children + bmi * smoker + smoker * region,
+  data = ins
+)
+with_age_smoker <- lm(
+  charges ~ age * smoker + children + bmi * smoker + region,
+  data = ins
+)
+with_age_region <- lm(
+  charges ~ age * region + children + bmi * smoker,
+  data = ins
+)
+with_bmi_region <- lm(
+  charges ~ age + children + bmi * smoker + bmi * region,
+  data = ins
+)
+with_both_twoway <- lm(
+  charges ~ age + children + (bmi + smoker) * region + bmi:smoker,
+  data = ins
+)
+with_threeway <- lm(
+  charges ~ age + children + bmi * smoker * region,
+  data = ins
+)
+additive <- lm(charges ~ age + children + bmi + smoker + region, data = ins)
+
+tests <- bind_rows(
+  partial_f(no_children, explain, "Add children"),
+  partial_f(explain, with_sex, "Add sex"),
+  partial_f(no_region, explain, "Add region as a level shift"),
+  partial_f(explain, with_smoker_region, "Let the smoker gap differ by region"),
+  partial_f(explain, with_age_smoker, "Let the age slope differ by smoker"),
+  partial_f(explain, with_age_region, "Let the age slope differ by region"),
+  partial_f(explain, with_bmi_region, "Let the BMI slope differ by region"),
+  partial_f(
+    with_both_twoway,
+    with_threeway,
+    "Let the smoker BMI slope differ by region"
+  ),
+  partial_f(additive, explain, "Let the BMI slope differ by smoker")
+)
+
+gap_at <- function(model, bmi) {
+  contrast(model, c(smokeryes = 1, `bmi:smokeryes` = bmi))
+}
+gaps <- bind_rows(lapply(c(25, 30, 35), function(x) {
+  cbind(bmi = x, gap_at(explain, x))
+}))
+slope_no <- contrast(explain, c(bmi = 1))
+slope_yes <- contrast(explain, c(bmi = 1, `bmi:smokeryes` = 1))
+
+coef_raw <- summary(explain)$coefficients
+coef_ci <- confint(explain)
+explain_coefs <- data.frame(
+  term = rownames(coef_raw),
+  estimate = coef_raw[, 1],
+  std_error = coef_raw[, 2],
+  p_value = coef_raw[, 4],
+  lcl = coef_ci[, 1],
+  ucl = coef_ci[, 2],
+  row.names = NULL
+)
+
+explain_sqrt <- lm(sqrt(charges) ~ age + children + bmi * smoker + region, data = ins)
+explain_log <- lm(log(charges) ~ age + children + bmi * smoker + region, data = ins)
+log_age_smoker <- lm(
+  log(charges) ~ age * smoker + children + bmi * smoker + region,
+  data = ins
+)
+p_age_dollar <- anova(explain, with_age_smoker)[["Pr(>F)"]][2]
+p_age_log <- anova(explain_log, log_age_smoker)[["Pr(>F)"]][2]
+
+scale_table <- bind_rows(
+  resid_summary(explain, "Dollars"),
+  resid_summary(explain_sqrt, "Square root of dollars"),
+  resid_summary(explain_log, "Log of dollars"),
+  resid_summary(log_age_smoker, "Log of dollars, age slope differs by smoker")
+)
+
+resid_frame <- function(model, scale) {
+  data.frame(
+    scale = scale,
+    fitted = fitted(model),
+    std_resid = rstandard(model),
+    smoker = model$model$smoker,
+    stringsAsFactors = FALSE
+  )
+}
+mlr_resid <- bind_rows(
+  resid_frame(explain, "Dollars"),
+  resid_frame(explain_sqrt, "Square root"),
+  resid_frame(explain_log, "Log")
+)
+mlr_resid$scale <- factor(
+  mlr_resid$scale,
+  levels = c("Dollars", "Square root", "Log")
+)
+
+cooks <- cooks.distance(explain)
+cook_cut <- 4 / nobs(explain)
+n_cook <- sum(cooks > cook_cut)
+n_tail <- sum(abs(rstudent(explain)) > 3)
+max_cook <- max(cooks)
+sd_ratio_dollar <- scale_table$sd_ratio[scale_table$scale == "Dollars"]
+```
+
+```{r predict, cache=TRUE, cache.lazy=FALSE}
+# Every recorded field, including sex, and every product of two fields.
+# No squared BMI term.
+full_formula <- charges ~ (age + sex + bmi + children + smoker + region)^2
+
+# Raw fields for neighbors and trees. The BMI x smoker product is not written
+# down. A tree can split on smoker and then on BMI.
+np_formula <- charges ~ age + sex + bmi + children + smoker + region
+
+set.seed(1234)
+train_index <- createDataPartition(ins$charges, p = 0.8, list = FALSE)
+train <- ins[train_index, ]
+valid <- ins[-train_index, ]
+
+set.seed(1234)
+fold_index <- createFolds(ins$charges, k = 10, returnTrain = TRUE)
+cv_control <- trainControl(method = "cv", number = 10, index = fold_index)
+
+fold_id <- rep(0, nrow(ins))
+for (i in seq_along(fold_index)) {
+  left_out <- setdiff(1:nrow(ins), fold_index[[i]])
+  fold_id[left_out] <- i
+}
+
+set.seed(1234)
+train_fold_index <- createFolds(train$charges, k = 10, returnTrain = TRUE)
+train_control <- trainControl(method = "cv", number = 10, index = train_fold_index)
+train_fold_id <- rep(0, nrow(train))
+for (i in seq_along(train_fold_index)) {
+  left_out <- setdiff(1:nrow(train), train_fold_index[[i]])
+  train_fold_id[left_out] <- i
+}
+
+cv_lm <- function(formula) {
+  fold_rmse <- numeric(length(fold_index))
+  for (i in seq_along(fold_index)) {
+    fit_rows <- fold_index[[i]]
+    score_rows <- setdiff(1:nrow(ins), fit_rows)
+    fit_i <- lm(formula, data = ins[fit_rows, ])
+    pred_i <- predict(fit_i, newdata = ins[score_rows, ])
+    fold_rmse[i] <- rmse(ins$charges[score_rows], pred_i)
+  }
+  fold_rmse
+}
+
+explain_fit <- lm(explain_formula, data = train)
+explain_scores <- linear_scores(explain_fit)
+explain_folds <- cv_lm(explain_formula)
+explain_cv <- mean(explain_folds)
+explain_cv_sd <- sd(explain_folds)
+explain_hold <- rmse(valid$charges, predict(explain_fit, newdata = valid))
+
+full_fit <- lm(full_formula, data = train)
+full_scores <- linear_scores(full_fit)
+full_folds <- cv_lm(full_formula)
+full_cv <- mean(full_folds)
+full_cv_sd <- sd(full_folds)
+full_hold <- rmse(valid$charges, predict(full_fit, newdata = valid))
+
+step_fit <- step(
+  full_fit,
+  scope = list(lower = ~1, upper = full_formula),
+  direction = "both",
+  trace = 0
+)
+step_scores <- linear_scores(step_fit)
+step_folds <- numeric(length(fold_index))
+for (i in seq_along(fold_index)) {
+  fit_rows <- fold_index[[i]]
+  score_rows <- setdiff(1:nrow(ins), fit_rows)
+  full_i <- lm(full_formula, data = ins[fit_rows, ])
+  step_i <- step(
+    full_i,
+    scope = list(lower = ~1, upper = full_formula),
+    direction = "both",
+    trace = 0
+  )
+  pred_i <- predict(step_i, newdata = ins[score_rows, ])
+  step_folds[i] <- rmse(ins$charges[score_rows], pred_i)
+}
+step_cv <- mean(step_folds)
+step_cv_sd <- sd(step_folds)
+step_hold <- rmse(valid$charges, predict(step_fit, newdata = valid))
+step_kept_bmi <- "bmi:smokeryes" %in% names(coef(step_fit))
+step_kept_sex <- "sexmale" %in% names(coef(step_fit))
+step_n_terms <- length(coef(step_fit)) - 1
+explain_n_terms <- length(coef(explain_fit)) - 1
+full_n_terms <- length(coef(full_fit)) - 1
+
+x <- model.matrix(full_formula, data = ins)[, -1]
+lasso_cv_fit <- cv.glmnet(
+  x, ins$charges,
+  alpha = 1,
+  foldid = fold_id,
+  keep = TRUE
+)
+penalty_col <- which.min(abs(lasso_cv_fit$lambda - lasso_cv_fit$lambda.1se))
+out_of_fold <- lasso_cv_fit$fit.preval[, penalty_col]
+lasso_folds <- numeric(length(fold_index))
+for (i in seq_along(fold_index)) {
+  rows <- fold_id == i
+  lasso_folds[i] <- rmse(ins$charges[rows], out_of_fold[rows])
+}
+lasso_cv_rmse <- mean(lasso_folds)
+lasso_cv_sd <- sd(lasso_folds)
+lasso_train <- cv.glmnet(
+  x[train_index, ],
+  train$charges,
+  alpha = 1,
+  foldid = train_fold_id
+)
+lasso_pred <- as.numeric(predict(
+  lasso_train,
+  newx = x[-train_index, ],
+  s = "lambda.1se"
+))
+lasso_hold <- rmse(valid$charges, lasso_pred)
+b_pen <- as.matrix(coef(lasso_cv_fit, s = "lambda.1se"))
+i_min <- which.min(abs(lasso_cv_fit$lambda - lasso_cv_fit$lambda.min))
+i_1se <- which.min(abs(lasso_cv_fit$lambda - lasso_cv_fit$lambda.1se))
+n_start <- nrow(b_pen) - 1
+n_at_min <- lasso_cv_fit$nzero[i_min]
+n_keep <- lasso_cv_fit$nzero[i_1se]
+
+knn_cv <- train(
+  np_formula,
+  data = ins,
+  method = "knn",
+  trControl = cv_control,
+  preProcess = c("center", "scale"),
+  tuneGrid = expand.grid(k = c(1:10, 20, 30))
+)
+knn_hold_fit <- train(
+  np_formula,
+  data = train,
+  method = "knn",
+  trControl = train_control,
+  preProcess = c("center", "scale"),
+  tuneGrid = expand.grid(k = c(1:10, 20, 30))
+)
+k_chosen <- knn_cv$bestTune$k
+k_rmse <- function(k) knn_cv$results$RMSE[knn_cv$results$k == k]
+knn_cv_rmse <- mean(knn_cv$resample$RMSE)
+knn_cv_sd <- sd(knn_cv$resample$RMSE)
+knn_hold <- rmse(valid$charges, predict(knn_hold_fit, newdata = valid))
+
+set.seed(1234)
+bag_cv <- train(
+  np_formula,
+  data = ins,
+  method = "treebag",
+  trControl = cv_control
+)
+set.seed(1234)
+bag_hold_fit <- train(
+  np_formula,
+  data = train,
+  method = "treebag",
+  trControl = train_control
+)
+bag_cv_rmse <- mean(bag_cv$resample$RMSE)
+bag_cv_sd <- sd(bag_cv$resample$RMSE)
+bag_hold <- rmse(valid$charges, predict(bag_hold_fit, newdata = valid))
+
+set.seed(1234)
+forest_cv <- train(
+  np_formula,
+  data = ins,
+  method = "rf",
+  trControl = cv_control,
+  tuneLength = 3
+)
+set.seed(1234)
+forest_hold_fit <- train(
+  np_formula,
+  data = train,
+  method = "rf",
+  trControl = train_control,
+  tuneLength = 3
+)
+forest_cv_rmse <- mean(forest_cv$resample$RMSE)
+forest_cv_sd <- sd(forest_cv$resample$RMSE)
+forest_hold <- rmse(valid$charges, predict(forest_hold_fit, newdata = valid))
+forest_mtry <- forest_cv$bestTune$mtry
+forest_ntree <- forest_cv$finalModel$ntree
+
+compare <- data.frame(
+  model = c(
+    "Explanation equation",
+    "All two-way products",
+    "Term search",
+    "Shrunk equation",
+    "Nearest neighbors",
+    "Averaged trees",
+    "Random forest"
+  ),
+  AIC = c(
+    explain_scores$AIC, full_scores$AIC, step_scores$AIC,
+    NA, NA, NA, NA
+  ),
+  BIC = c(
+    explain_scores$BIC, full_scores$BIC, step_scores$BIC,
+    NA, NA, NA, NA
+  ),
+  adj_r2 = c(
+    explain_scores$adj_r2, full_scores$adj_r2, step_scores$adj_r2,
+    NA, NA, NA, NA
+  ),
+  PRESS = c(
+    explain_scores$PRESS, full_scores$PRESS, step_scores$PRESS,
+    NA, NA, NA, NA
+  ),
+  cv_rmse = c(
+    explain_cv, full_cv, step_cv, lasso_cv_rmse,
+    knn_cv_rmse, bag_cv_rmse, forest_cv_rmse
+  ),
+  cv_sd = c(
+    explain_cv_sd, full_cv_sd, step_cv_sd, lasso_cv_sd,
+    knn_cv_sd, bag_cv_sd, forest_cv_sd
+  ),
+  valid_rmse = c(
+    explain_hold, full_hold, step_hold, lasso_hold,
+    knn_hold, bag_hold, forest_hold
+  ),
+  stringsAsFactors = FALSE
+)
+
+line_models <- c(
+  "Explanation equation", "All two-way products", "Term search", "Shrunk equation"
+)
+tree_models <- c("Averaged trees", "Random forest")
+best_model <- compare$model[which.min(compare$cv_rmse)]
+best_holdout <- compare$model[which.min(compare$valid_rmse)]
+best_cv <- min(compare$cv_rmse)
+best_sd <- compare$cv_sd[which.min(compare$cv_rmse)]
+best_tree <- tree_models[which.min(compare$cv_rmse[match(tree_models, compare$model)])]
+if (!(best_model %in% line_models)) {
+  production <- best_model
+} else if (min(compare$cv_rmse[match(tree_models, compare$model)]) <= best_cv + best_sd) {
+  production <- best_tree
+} else {
+  production <- best_model
+}
+
+high <- valid$smoker == "no" & valid$charges > 15000
+n_high <- sum(high)
+mae_explain_high <- mean(abs(
+  valid$charges[high] - predict(explain_fit, newdata = valid)[high]
+))
+mae_forest_high <- mean(abs(
+  valid$charges[high] - predict(forest_hold_fit, newdata = valid)[high]
+))
+```
+
+```{r bootstrap, cache=TRUE, cache.lazy=FALSE}
+# Paired bootstrap refits the explanation equation on customers drawn with
+# replacement. Residual bootstrap redraws the misses from one pool.
+# The residual plot rejects one common spread, so the paired range is the
+# one we would quote. Seed 1234. One thousand draws.
+set.seed(1234)
+boot_paired <- paired.boot(explain_formula, B = 1000, seed = 1234, data = ins)
+set.seed(1234)
+boot_resid <- residual.boot(explain_formula, B = 1000, seed = 1234, data = ins)
+
+age_ordinary <- confint(explain)["age", ]
+age_paired <- quantile(boot_paired$bootEstParam[, "age"], c(0.025, 0.975))
+age_resid_ci <- quantile(boot_resid$bootEstParam[, "age"], c(0.025, 0.975))
+
+b_all <- coef(explain)
+gap_hat <- unname(b_all["smokeryes"] + 30 * b_all["bmi:smokeryes"])
+gap_paired <- quantile(
+  boot_paired$bootEstParam[, "smokeryes"] +
+    30 * boot_paired$bootEstParam[, "bmi:smokeryes"],
+  c(0.025, 0.975)
+)
+gap_resid_ci <- quantile(
+  boot_resid$bootEstParam[, "smokeryes"] +
+    30 * boot_resid$bootEstParam[, "bmi:smokeryes"],
+  c(0.025, 0.975)
+)
+
+resid_all <- resid(explain)
+sd_all <- sd(resid_all)
+sd_no <- sd(resid_all[ins$smoker == "no"])
+sd_yes <- sd(resid_all[ins$smoker == "yes"])
+```
+
+```{r shape-and-margin, cache=TRUE, cache.lazy=FALSE}
+# Quoted charges as BMI changes. Age, children, sex, and region stay put,
+# so the lines are the shape of each method, not a mix of customers.
+age_hold <- median(ins$age)
+child_hold <- median(ins$children)
+bmi_grid <- seq(min(ins$bmi), max(ins$bmi), length.out = 80)
+shape_grid <- expand.grid(
+  bmi = bmi_grid,
+  smoker = factor(c("no", "yes"), levels = levels(ins$smoker)),
+  stringsAsFactors = FALSE
+)
+shape_grid$age <- age_hold
+shape_grid$children <- child_hold
+shape_grid$sex <- factor("female", levels = levels(ins$sex))
+shape_grid$region <- factor("northeast", levels = levels(ins$region))
+shape_grid$charges <- 0
+
+full_shape <- lm(full_formula, data = ins)
+step_shape <- step(
+  full_shape,
+  scope = list(lower = ~1, upper = full_formula),
+  direction = "both",
+  trace = 0
+)
+grid_x <- model.matrix(full_formula, data = shape_grid)[, -1, drop = FALSE]
+grid_x <- grid_x[, colnames(x), drop = FALSE]
+
+shape_grid$`Explanation equation` <- predict(explain, newdata = shape_grid)
+shape_grid$`All two-way products` <- predict(full_shape, newdata = shape_grid)
+shape_grid$`Term search` <- predict(step_shape, newdata = shape_grid)
+shape_grid$`Shrunk equation` <- as.numeric(predict(
+  lasso_cv_fit, newx = grid_x, s = "lambda.1se"
+))
+shape_grid$`Nearest neighbors` <- predict(knn_cv, newdata = shape_grid)
+shape_grid$`Averaged trees` <- predict(bag_cv, newdata = shape_grid)
+shape_grid$`Random forest` <- predict(forest_cv, newdata = shape_grid)
+
+model_levels <- c(
+  "Explanation equation",
+  "All two-way products",
+  "Term search",
+  "Shrunk equation",
+  "Nearest neighbors",
+  "Averaged trees",
+  "Random forest"
+)
+model_colors <- c(
+  "Explanation equation" = "#1B4F72",
+  "All two-way products" = "#7F8C8D",
+  "Term search" = "#B9770E",
+  "Shrunk equation" = "#1E8449",
+  "Nearest neighbors" = "#CA6F1E",
+  "Averaged trees" = "#6C3483",
+  "Random forest" = "#922B21"
+)
+curves <- tidyr::pivot_longer(
+  shape_grid,
+  cols = all_of(model_levels),
+  names_to = "model",
+  values_to = "quoted"
+)
+curves$model <- factor(curves$model, levels = model_levels)
+curves$smoker_label <- ifelse(curves$smoker == "yes", "Smoker", "Non-smoker")
+
+nearby <- ins[abs(ins$age - age_hold) <= 5, ]
+nearby$smoker_label <- ifelse(nearby$smoker == "yes", "Smoker", "Non-smoker")
+
+p_shape <- ggplot() +
+  geom_point(
+    data = nearby,
+    aes(x = bmi, y = charges),
+    color = "#C5BEB4",
+    alpha = 0.55,
+    size = 1.2
+  ) +
+  geom_line(
+    data = curves,
+    aes(x = bmi, y = quoted, color = model),
+    linewidth = 0.95
+  ) +
+  facet_wrap(~smoker_label) +
+  scale_color_manual(values = model_colors, breaks = model_levels) +
+  labs(
+    title = "What each method quotes as BMI changes",
+    subtitle = paste0(
+      "Age held at ", age_hold,
+      ", children at ", child_hold,
+      ", female, northeast. Gray points are customers within 5 years of that age."
+    ),
+    x = "BMI",
+    y = "Quoted charges ($)",
+    color = NULL
+  ) +
+  theme(legend.position = "bottom")
+ggsave(
+  "figures/bias_variance.png",
+  p_shape, width = 10, height = 5.6, dpi = 160, bg = "white"
+)
+
+# Left-out misses. One prediction per customer, from a fit that did not
+# include that customer. Squared miss is the contribution to mean squared error.
+oof_rows <- function(formula, search) {
+  pred <- rep(NA_real_, nrow(ins))
+  for (i in seq_along(fold_index)) {
+    fit_rows <- fold_index[[i]]
+    score_rows <- setdiff(seq_len(nrow(ins)), fit_rows)
+    fit_i <- lm(formula, data = ins[fit_rows, ])
+    if (search) {
+      fit_i <- step(
+        fit_i,
+        scope = list(lower = ~1, upper = formula),
+        direction = "both",
+        trace = 0
+      )
+    }
+    pred[score_rows] <- predict(fit_i, newdata = ins[score_rows, ])
+  }
+  pred
+}
+
+pull_oof <- function(fit) {
+  p <- fit$pred
+  tune_cols <- intersect(names(fit$bestTune), names(p))
+  for (col in tune_cols) {
+    p <- p[p[[col]] == fit$bestTune[[1, col]], ]
+  }
+  p <- p[!duplicated(p$rowIndex), ]
+  out <- rep(NA_real_, nrow(ins))
+  out[p$rowIndex] <- p$pred
+  if (anyNA(out)) stop("A left-out customer has no prediction.")
+  out
+}
+
+oof_control <- trainControl(
+  method = "cv",
+  number = 10,
+  index = fold_index,
+  savePredictions = "final"
+)
+set.seed(1234)
+knn_oof_fit <- train(
+  np_formula,
+  data = ins,
+  method = "knn",
+  trControl = oof_control,
+  preProcess = c("center", "scale"),
+  tuneGrid = expand.grid(k = c(1:10, 20, 30))
+)
+set.seed(1234)
+bag_oof_fit <- train(
+  np_formula,
+  data = ins,
+  method = "treebag",
+  trControl = oof_control
+)
+set.seed(1234)
+forest_oof_fit <- train(
+  np_formula,
+  data = ins,
+  method = "rf",
+  trControl = oof_control,
+  tuneLength = 3
+)
+
+oof_pred <- data.frame(
+  smoker = ins$smoker,
+  actual = ins$charges,
+  `Explanation equation` = oof_rows(explain_formula, FALSE),
+  `All two-way products` = oof_rows(full_formula, FALSE),
+  `Term search` = oof_rows(full_formula, TRUE),
+  `Shrunk equation` = out_of_fold,
+  `Nearest neighbors` = pull_oof(knn_oof_fit),
+  `Averaged trees` = pull_oof(bag_oof_fit),
+  `Random forest` = pull_oof(forest_oof_fit),
+  check.names = FALSE
+)
+
+miss_long <- pivot_longer(
+  oof_pred,
+  cols = all_of(model_levels),
+  names_to = "model",
+  values_to = "quoted"
+)
+miss_long$miss <- miss_long$actual - miss_long$quoted
+miss_long$squared_miss <- miss_long$miss^2
+miss_long$model <- factor(miss_long$model, levels = model_levels)
+miss_long$smoker_label <- ifelse(miss_long$smoker == "yes", "Smoker", "Non-smoker")
+
+margin_table <- miss_long %>%
+  group_by(model, smoker_label) %>%
+  summarise(
+    abs95 = quantile(abs(miss), 0.95),
+    q025 = quantile(miss, 0.025),
+    q975 = quantile(miss, 0.975),
+    .groups = "drop"
+  )
+
+abs95_of <- function(model_name, smoker_label) {
+  margin_table$abs95[
+    margin_table$model == model_name &
+      margin_table$smoker_label == smoker_label
+  ]
+}
+q_of <- function(model_name, smoker_label, column) {
+  margin_table[[column]][
+    margin_table$model == model_name &
+      margin_table$smoker_label == smoker_label
+  ]
+}
+forest_abs95_yes <- abs95_of("Random forest", "Smoker")
+forest_abs95_no <- abs95_of("Random forest", "Non-smoker")
+explain_abs95_yes <- abs95_of("Explanation equation", "Smoker")
+explain_abs95_no <- abs95_of("Explanation equation", "Non-smoker")
+forest_q025_yes <- q_of("Random forest", "Smoker", "q025")
+forest_q975_yes <- q_of("Random forest", "Smoker", "q975")
+forest_q025_no <- q_of("Random forest", "Non-smoker", "q025")
+forest_q975_no <- q_of("Random forest", "Non-smoker", "q975")
+explain_q025_yes <- q_of("Explanation equation", "Smoker", "q025")
+explain_q975_yes <- q_of("Explanation equation", "Smoker", "q975")
+explain_q025_no <- q_of("Explanation equation", "Non-smoker", "q025")
+explain_q975_no <- q_of("Explanation equation", "Non-smoker", "q975")
+
+write.csv(margin_table, "talk_margins.csv", row.names = FALSE)
+
+# The mean absolute miss is pulled by the tail. The median is the
+# middle customer: half the bills are closer to the quote than this.
+center_by <- miss_long %>%
+  group_by(model, smoker_label) %>%
+  summarise(
+    median_abs = median(abs(miss)),
+    mean_abs = mean(abs(miss)),
+    rmse = sqrt(mean(squared_miss)),
+    .groups = "drop"
+  )
+center_all <- miss_long %>%
+  group_by(model) %>%
+  summarise(
+    median_abs = median(abs(miss)),
+    mean_abs = mean(abs(miss)),
+    rmse = sqrt(mean(squared_miss)),
+    .groups = "drop"
+  )
+pick_median <- function(frame, group) {
+  rows <- frame[frame$smoker_label == group, ]
+  as.character(rows$model[which.min(rows$median_abs)])
+}
+best_med_yes <- pick_median(center_by, "Smoker")
+best_med_no <- pick_median(center_by, "Non-smoker")
+best_med <- as.character(center_all$model[which.min(center_all$median_abs)])
+med_of <- function(model_name, group) {
+  center_by$median_abs[
+    center_by$model == model_name & center_by$smoker_label == group
+  ]
+}
+mean_of <- function(model_name, group) {
+  center_by$mean_abs[
+    center_by$model == model_name & center_by$smoker_label == group
+  ]
+}
+med_f_yes <- med_of("Random forest", "Smoker")
+med_f_no <- med_of("Random forest", "Non-smoker")
+mean_f_yes <- mean_of("Random forest", "Smoker")
+mean_f_no <- mean_of("Random forest", "Non-smoker")
+med_e_yes <- med_of("Explanation equation", "Smoker")
+med_e_no <- med_of("Explanation equation", "Non-smoker")
+mean_e_yes <- mean_of("Explanation equation", "Smoker")
+mean_e_no <- mean_of("Explanation equation", "Non-smoker")
+med_f <- center_all$median_abs[center_all$model == "Random forest"]
+mean_f <- center_all$mean_abs[center_all$model == "Random forest"]
+write.csv(center_by, "talk_center.csv", row.names = FALSE)
+```
+
+## The Big Picture
+
+Smoking status dominates the bill, followed by BMI, children then age. Smokers are `r pct(n_yes / n)` of these `r format(n, big.mark = ",")` customers, and their average charges are `r times_word(mean_yes / mean_no)` times the non-smoker average: `r dollars(mean_yes)` versus `r dollars(mean_no)`. 
+
+Holding age, number of children, and region fixed, mean charges for a smoker at BMI 30 are `r dollars(gaps$estimate[gaps$bmi == 30])` (`r pct(mean_yes / mean_no - 1)`) higher than for a non-smoker at the same BMI. The range we would quote, from one thousand resamples of whole customers, is `r range_words(gap_paired[1], gap_paired[2])`. At BMI 25 our best estimate is `r dollars(gaps$estimate[gaps$bmi == 25])`, and `r dollars(gaps$estimate[gaps$bmi == 35])` at BMI 35. Among smokers, each extra BMI point is associated with about `r dollars(slope_yes$estimate)` more. Among non-smokers, the BMI slope is not clearly different from zero.
+
+The smoking result does not clearly change by region. Region does shift the level of the bill. After age, children, BMI, and smoking status are held fixed, the southeast average is `r dollars(abs(explain_coefs$estimate[explain_coefs$term == "regionsoutheast"]))` lower than the northeast, and the southwest average is `r dollars(abs(explain_coefs$estimate[explain_coefs$term == "regionsouthwest"]))` lower. The unadjusted southeast average looks high because that region has more smokers and a higher BMI, not because the region itself adds cost once those facts are in the equation.
+
+Each additional year of age is associated with `r dollars(explain_coefs$estimate[explain_coefs$term == "age"])` higher mean charges in both groups, about `r pct(explain_coefs$estimate[explain_coefs$term == "age"] / mean_charges)` of the average bill. Each additional child is associated with `r dollars(explain_coefs$estimate[explain_coefs$term == "children"])`. Sex is not clearly associated with charges once the other facts are held fixed.
+
+We recommend a random forest prediction model due to the variability in charges. The prediction model is not easy to interpret, refer to the equation to drive conversations. 
+
+Margin of errors were constructed by leaving each customer out of the fit once. 
+95% of errors were within `r dollars(forest_abs95_yes)` for smokers and `r dollars(forest_abs95_no)` for non-smokers. The explanation equation's margins on the same customers are `r dollars(explain_abs95_yes)` for smokers and `r dollars(explain_abs95_no)` for non-smokers. We compared this cross-validation to a 20% validation test to illustrate a bias-variance trade-off between models. 
+
+These averages are still dominated by a few customers in the sample. For example, half of smoker bills fell within `r dollars(med_f_yes)` of the prediction model's quote, against an average absolute error of `r dollars(mean_f_yes)`. Half of non-smoker bills fell within `r dollars(med_f_no)`, against an average of `r dollars(mean_f_no)`. Using the median, the closest smoker quote is the `r tolower(best_med_yes)`, and the closest non-smoker quote is the `r  tolower(best_med_no)` by only `r dollars(med_f_no - med_of(best_med_no, "Non-smoker"))`. We still recommend a random forest method for prediction after considering both average and median.
+
+The forest is `r dollars(med_e_yes - med_f_yes)` closer than the equation for the typical smoker. Use the forest to score because, once BMI is high, its quote levels off with the smoker cloud instead of climbing past it in a straight line, and because the typical customer is closer to that quote than the average error suggests. Use the equation when someone asks why the bill moved.
+
+## Data Summary
+
+We used `r format(n, big.mark = ",")` distinct customers in four US regions in our sample. They are not a random sample of the country. Smoking was not assigned. The intervals describe this file. They are not a causal effect of smoking, weight, or region, and they are not a guarantee for one future person.
+
+The file arrived with `r format(n_raw, big.mark = ",")` rows and `r n_miss` missing cells. One exact duplicate was a 19-year-old northwest man, a non-smoker, BMI 30.59, no children, charges $1,639.56. The extra copy is dropped in this code. The file on disk is not edited. Every number below uses `r format(n, big.mark = ",")` customers. Charges run from `r dollars(min(ins$charges))` to `r dollars(max(ins$charges))`. 
+
+| Fact | What it is | How we use it |
+|---|---|---|
+| Age | Years, 18 to 64 | A dollar amount per year |
+| Sex | Female or male | Checked, then left out of the explanation |
+| BMI | Body mass index | A dollar amount per point, allowed to differ for smokers |
+| Children | Count, 0 to 5 | A dollar amount per child |
+| Smoker | Yes or no | The main split in the book |
+| Region | Northeast, northwest, southeast, southwest | A level shift. Northeast is the reference |
+| Charges | Health-account charges, in dollars | The bill we are explaining and pricing |
+
+```{r accounts-tables, echo=FALSE}
+smoker_show <- smoker_book
+smoker_show$smoker <- ifelse(smoker_show$smoker == "yes", "Smoker", "Non-smoker")
+smoker_show$mean_charges <- dollars(smoker_show$mean_charges)
+smoker_show$median_charges <- dollars(smoker_show$median_charges)
+smoker_show$sd_charges <- dollars(smoker_show$sd_charges)
+names(smoker_show) <- c(
+  "Group", "Customers", "Average bill", "Median bill", "Spread (SD)"
+)
+smoker_show
+
+num_show <- num_summary
+num_show$name <- c("Age (years)", "BMI", "Children", "Charges ($)")
+num_show$mean <- round(num_show$mean, 1)
+num_show$sd <- round(num_show$sd, 1)
+num_show$min <- round(num_show$min, 1)
+num_show$q25 <- round(num_show$q25, 1)
+num_show$median <- round(num_show$median, 1)
+num_show$q75 <- round(num_show$q75, 1)
+num_show$max <- round(num_show$max, 1)
+names(num_show) <- c(
+  "Fact", "Customers", "Average", "SD", "Min", "25th", "Median", "75th", "Max"
+)
+num_show
+```
+
+Sex is nearly balanced (`r sum(ins$sex == "female")` female, `r sum(ins$sex == "male")` male). The four regions each hold `r min(region_mix$n)` to `r max(region_mix$n)` customers. Smokers are uneven across regions: the smoker share runs from `r pct(min(region_mix$smoker_rate))` to `r pct(max(region_mix$smoker_rate))`. Only `r sum(ins$children >= 4)` customers have four or five children, so the per-child amount is identified mostly from zero to three children.
+
+### Skewness 
+
+The average bill is `r dollars(mean_charges)` and the median is `r dollars(median_charges)`, illustrating a right-skewed distribution. We consider large bills to be a representative sample and retain them when modeling to influence performance.
+
+```{r fig-shape, fig.height=3.6}
+p_charges <- ggplot(ins, aes(x = charges)) +
+  geom_histogram(bins = 30, fill = "#1F4E5F", color = "white") +
+  labs(title = "Most bills sit under $15,000. A long right tail does not.",
+       x = "Charges ($)", y = "Customers")
+p_log <- ggplot(ins, aes(x = log(charges))) +
+  geom_histogram(bins = 30, fill = "#8A8175", color = "white") +
+  labs(title = "A log scale looks calmer. We still report dollars.",
+       x = "Log of charges", y = "Customers")
+grid.arrange(p_charges, p_log, ncol = 2)
+ggsave(
+  "figures/charges_shape.png",
+  arrangeGrob(p_charges, p_log, ncol = 2),
+  width = 9, height = 3.6, dpi = 160, bg = "white"
+)
+```
+
+A transformation was fit and not adopted as we saw insufficient evidence to justify the change. Review the appendix for an in-depth discussion. Given the skewness, we continue exploring the data by reviewing the median to represent a typical customer. 
+
+### Smoker Disparity
+
+The median bill is `r dollars(median_charges)`, about `r pct(1 - median_charges / mean_charges)` below the average.
+
+```{r fig-smoker, fig.height=4}
+p_smoker <- ggplot(ins, aes(x = smoker, y = charges, fill = smoker)) +
+  geom_boxplot(outlier.alpha = 0.4) +
+  scale_fill_manual(values = smoker_colors) +
+  scale_x_discrete(labels = c("Non-smoker", "Smoker")) +
+  guides(fill = "none") +
+  labs(title = "Smoking status",
+       x = NULL, y = "Charges ($)")
+print(p_smoker)
+ggsave("figures/smoker_box.png", p_smoker, width = 7, height = 4, dpi = 160, bg = "white")
+```
+
+The smoker median is `r dollars(median_yes)`. The non-smoker median is `r dollars(median_no)`. The boxes barely overlap. A pricing method that ignores smoking status is will be incomplete.
+
+### Age Shift
+
+```{r fig-age, fig.height=4.2}
+p_age <- ggplot(ins, aes(x = age, y = charges, color = smoker)) +
+  geom_point(alpha = 0.35, size = 1.1) +
+  geom_smooth(method = "lm", se = FALSE, formula = y ~ x) +
+  scale_color_manual(
+    values = smoker_colors,
+    labels = c("Non-smoker", "Smoker")
+  ) +
+  labs(title = "Age does not discriminate",
+       x = "Age (years)", y = "Charges ($)", color = NULL)
+print(p_age)
+ggsave("figures/age_smoker.png", p_age, width = 8, height = 4.2, dpi = 160, bg = "white")
+```
+
+The age correlation is `r round(r_age_no, 2)` among non-smokers and `r round(r_age_yes, 2)` among smokers. The slopes are roughly parallel, signaling slope should not differ by smoking status on the dollar scale.
+
+### BMI Interaction
+
+```{r fig-bmi, fig.height=4.4}
+p_bmi <- ggplot(ins, aes(x = bmi, y = charges, color = smoker)) +
+  geom_point(alpha = 0.4, size = 1.1) +
+  geom_smooth(method = "lm", se = FALSE, formula = y ~ x) +
+  scale_color_manual(
+    values = smoker_colors,
+    labels = c("Non-smoker", "Smoker")
+  ) +
+  labs(
+    title = "BMI and the bill move together for smokers, and almost not at all otherwise",
+    x = "BMI", y = "Charges ($)", color = NULL
+  )
+print(p_bmi)
+ggsave("figures/bmi_smoker.png", p_bmi, width = 8, height = 4.4, dpi = 160, bg = "white")
+```
+
+Among smokers the correlation is `r round(r_bmi_yes, 2)`. Among non-smokers it is `r round(r_bmi_no, 2)`. One smoking coefficient, with a single BMI slope, would average a steep line and a flat line into a number that is true for neither group. The explanation equation lets the BMI slope differ by smoking status. The smoker gap is then read at a BMI that occurs in the file, not at BMI 0.
+
+### Region shift
+
+```{r fig-region, fig.height=4.4}
+p_region <- ggplot(ins, aes(x = region, y = charges, fill = smoker)) +
+  geom_boxplot(outlier.size = 0.6, outlier.alpha = 0.35) +
+  scale_fill_manual(
+    values = smoker_colors,
+    labels = c("Non-smoker", "Smoker")
+  ) +
+  labs(
+    title = "The smoking split appears in every region",
+    x = NULL, y = "Charges ($)", fill = NULL
+  )
+print(p_region)
+ggsave("figures/region_smoker.png", p_region, width = 8, height = 4.4, dpi = 160, bg = "white")
+```
+
+```{r region-means}
+region_show <- region_smoker
+region_show$smoker <- ifelse(region_show$smoker == "yes", "Smoker", "Non-smoker")
+region_show$mean_charges <- dollars(region_show$mean_charges)
+region_show$mean_bmi <- round(region_show$mean_bmi, 1)
+names(region_show) <- c("Region", "Group", "Customers", "Average bill", "Average BMI")
+region_show
+```
+
+Southeast smokers have the highest unadjusted average, `r dollars(region_smoker$mean_charges[region_smoker$region == "southeast" & region_smoker$smoker == "yes"])`. Northeast smokers average `r dollars(region_smoker$mean_charges[region_smoker$region == "northeast" & region_smoker$smoker == "yes"])`. The split has the same shape in every region: a high smoker band and a low non-smoker band. Region is mostly who is in the band, plus a level shift once smoking and BMI are held fixed. The next section tests that claim instead of leaving it as a picture.
+
+### Families Matter
+
+```{r fig-children, fig.height=4}
+p_children <- ggplot(ins, aes(x = factor(children), y = charges, fill = smoker)) +
+  geom_boxplot(outlier.size = 0.5, outlier.alpha = 0.3) +
+  scale_fill_manual(
+    values = smoker_colors,
+    labels = c("Non-smoker", "Smoker")
+  ) +
+  labs(
+    title = "Children move the bill much less than smoking",
+    x = "Number of children", y = "Charges ($)", fill = NULL
+  )
+print(p_children)
+ggsave("figures/children.png", p_children, width = 8, height = 4, dpi = 160, bg = "white")
+```
+
+The correlation between children and charges is `r round(cor(ins$children, ins$charges), 2)`. The boxes at four and five children are thin. We keep a per-child amount because the nested test supports it, and we do not pretend the line is well seen past three children.
+
+## The Equation
+
+\[
+\text{charges} = \beta_0 + \beta_1 \text{age} + \beta_2 \text{children} + \beta_3 \text{bmi} + \beta_4 \text{smoker} + \beta_5 (\text{bmi} \times \text{smoker}) + \text{region} + \varepsilon
+\]
+
+Smoking reference is non-smoker. Region reference is northeast. Sex is not in the equation. The smoker coefficient by itself is the gap at BMI 0, which is not practical. We quote at BMI 25, 30, and 35.
+
+Each row in the table below is a nested comparison against the equation above, or against the equation with the extra terms the row needs. A small p-value means the extra term improves the fit enough that chance is a poor explanation. It is not, by itself, a reason to add complexity.
+
+```{r test-table}
+test_show <- tests
+test_show$F <- round(test_show$F, 2)
+test_show$p_value <- show_p(test_show$p_value)
+names(test_show) <- c("Comparison", "Extra df", "F", "p-value")
+test_show
+```
+
+Children stay. Sex stays out (p `r show_p(tests$p_value[tests$comparison == "Add sex"])`). Region stays as a level shift. Letting the smoker gap differ by region does not clearly improve the fit (p `r show_p(tests$p_value[tests$comparison == "Let the smoker gap differ by region"])`). Letting the age slope differ by smoking status does not clearly improve the dollar equation (p `r show_p(tests$p_value[tests$comparison == "Let the age slope differ by smoker"])`). Letting the age slope differ by region does not either.
+
+Letting the BMI slope differ by region marginally improves the fit (p `r show_p(tests$p_value[tests$comparison == "Let the BMI slope differ by region"])`), but is confounded by demographics already included in the equation. The non-smoker BMI slope is small and does not provide enough evidence to support adding complexity. The southeast difference on that small slope is reported as a test, not as four new columns in the main table. Once both region products are available, letting the smoker BMI slope differ by region does not provide enough evidence to justify complexity (p `r show_p(tests$p_value[tests$comparison == "Let the smoker BMI slope differ by region"])`).
+
+The product of BMI and smoking status is not optional. Dropping it, after age, children, and region are already in the equation, provide overwhelm evidence of a difference in predictive power (p `r show_p(tests$p_value[tests$comparison == "Let the BMI slope differ by smoker"])`).
+
+```{r coef-table}
+term_labels <- c(
+  "(Intercept)" = "Intercept (not a customer at BMI 0)",
+  "age" = "Age, one year",
+  "children" = "Children, one child",
+  "bmi" = "BMI, one point, non-smoker",
+  "smokeryes" = "Smoker versus non-smoker, at BMI 0",
+  "regionnorthwest" = "Northwest versus northeast",
+  "regionsoutheast" = "Southeast versus northeast",
+  "regionsouthwest" = "Southwest versus northeast",
+  "bmi:smokeryes" = "Extra BMI slope for a smoker, one point"
+)
+coef_show <- explain_coefs
+coef_show$term <- term_labels[coef_show$term]
+coef_show$estimate <- dollars(coef_show$estimate)
+coef_show$range <- range_words(explain_coefs$lcl, explain_coefs$ucl)
+coef_show$p_value <- show_p(explain_coefs$p_value)
+coef_show <- coef_show[, c("term", "estimate", "range", "p_value")]
+names(coef_show) <- c("Term", "Estimate", "Ordinary 95% range", "p-value")
+coef_show
+```
+
+The fit uses all `r nobs(explain)` customers. Residual degrees of freedom are `r df.residual(explain)`. The residual standard deviation is `r dollars(sigma(explain))`. Variation explained by the model (Adjusted \(R^2\)) is `r round(summary(explain)$adj.r.squared, 3)`.
+
+### Insights
+
+Holding BMI, smoking status, number of children, and region fixed, each additional year of age is associated with `r dollars(explain_coefs$estimate[explain_coefs$term == "age"])` higher mean charges. The ordinary 95% range is `r range_words(explain_coefs$lcl[explain_coefs$term == "age"], explain_coefs$ucl[explain_coefs$term == "age"])`. The paired resampling range, which keeps each customer with their own residual error, is `r range_words(age_paired[1], age_paired[2])`. The same year-of-age amount fits smokers and non-smokers at about `r pct(explain_coefs$estimate[explain_coefs$term == "age"] / mean_charges)` of the average bill.
+
+Holding age, number of children, and region fixed, the difference in mean charges between a smoker and a non-smoker at BMI 30 is `r dollars(gaps$estimate[gaps$bmi == 30])`. The ordinary 95% range is `r range_words(gaps$lcl[gaps$bmi == 30], gaps$ucl[gaps$bmi == 30])`. The paired resampling range is `r range_words(gap_paired[1], gap_paired[2])`. The ordinary and paired ranges agree.
+
+The same contrast is `r dollars(gaps$estimate[gaps$bmi == 25])` at BMI 25 (`r range_words(gaps$lcl[gaps$bmi == 25], gaps$ucl[gaps$bmi == 25])`) and `r dollars(gaps$estimate[gaps$bmi == 35])` at BMI 35 (`r range_words(gaps$lcl[gaps$bmi == 35], gaps$ucl[gaps$bmi == 35])`). The gap widens by about `r dollars(slope_yes$estimate)` for each additional BMI point among smokers. The non-smoker BMI slope is `r dollars(slope_no$estimate)` per point, and that ordinary range includes zero (`r range_words(slope_no$lcl, slope_no$ucl)`).
+
+Holding age, BMI, smoking status, and region fixed, each additional child is associated with `r dollars(explain_coefs$estimate[explain_coefs$term == "children"])` higher mean charges (`r range_words(explain_coefs$lcl[explain_coefs$term == "children"], explain_coefs$ucl[explain_coefs$term == "children"])`).
+
+These are observational contrasts. Nothing was assigned. The interval is a statement about mean charges given the sample.
+
+### Region Shift
+
+The smoker gap does not clearly depend on region (p `r show_p(tests$p_value[tests$comparison == "Let the smoker gap differ by region"])`). The age slope does not clearly depend on region (p `r show_p(tests$p_value[tests$comparison == "Let the age slope differ by region"])`). The BMI slope among smokers does not clearly depend on region (p `r show_p(tests$p_value[tests$comparison == "Let the smoker BMI slope differ by region"])`).
+
+The BMI slope among non-smokers does differ by region (p `r show_p(tests$p_value[tests$comparison == "Let the BMI slope differ by region"])`). From the fit that allows it, the southeast non-smoker BMI slope is `r dollars(coef(with_bmi_region)["bmi:regionsoutheast"])` per point relative to the northeast (ordinary 95% range `r range_words(confint(with_bmi_region)["bmi:regionsoutheast", 1], confint(with_bmi_region)["bmi:regionsoutheast", 2])`). Both slopes are small next to the smoker slope of about `r dollars(slope_yes$estimate)` per point, which is evidence against including the product in this equation.
+
+For regional comparison only, holding age, children, BMI, and smoking status fixed, the southeast average is `r dollars(explain_coefs$estimate[explain_coefs$term == "regionsoutheast"])` relative to the northeast (`r range_words(explain_coefs$lcl[explain_coefs$term == "regionsoutheast"], explain_coefs$ucl[explain_coefs$term == "regionsoutheast"])`), about `r pct(abs(explain_coefs$estimate[explain_coefs$term == "regionsoutheast"]) / mean_charges)` of the average bill. The southwest contrast is `r dollars(explain_coefs$estimate[explain_coefs$term == "regionsouthwest"])` (`r range_words(explain_coefs$lcl[explain_coefs$term == "regionsouthwest"], explain_coefs$ucl[explain_coefs$term == "regionsouthwest"])`). The northwest range includes zero (`r range_words(explain_coefs$lcl[explain_coefs$term == "regionnorthwest"], explain_coefs$ucl[explain_coefs$term == "regionnorthwest"])`).
+
+```{r region-mix}
+mix_show <- region_mix
+mix_show$mean_bmi <- round(mix_show$mean_bmi, 1)
+mix_show$smoker_rate <- pct(mix_show$smoker_rate)
+mix_show$mean_charges <- dollars(mix_show$mean_charges)
+names(mix_show) <- c(
+  "Region", "Customers", "Average BMI", "Smoker share", "Average bill"
+)
+mix_show
+```
+
+Southeast has the highest unadjusted average bill, the highest average BMI, and the highest smoker share. The adjusted southeast number is negative. The unadjusted ranking is composition.
+
+### Unique Variation
+
+The sample includes a unique spread or errors because this equation may be confounded by variables in the population which our sample does not represent, such as hospitals used and pre-existing conditions. Inclusion of these variables are controversial, but would improve margin of error in linear models such as this one. 
+
+```{r fig-resid-scales, fig.height=3.8}
+p_scales <- ggplot(mlr_resid, aes(x = fitted, y = std_resid, color = smoker)) +
+  geom_point(alpha = 0.28, size = 0.7) +
+  geom_hline(yintercept = 0, linewidth = 0.3) +
+  facet_wrap(~scale, scales = "free_x") +
+  scale_color_manual(
+    values = smoker_colors,
+    labels = c("Non-smoker", "Smoker")
+  ) +
+  labs(
+    title = "The same equation on three scales",
+    x = "Fitted values",
+    y = "Standardized residual",
+    color = NULL
+  )
+print(p_scales)
+ggsave(
+  "figures/residuals_three_scales.png",
+  p_scales, width = 9, height = 3.8, dpi = 160, bg = "white"
+)
+```
+
+On the dollar scale, smoker errors are about `r round(sd_ratio_dollar, 2)` times as wide as non-smoker errors The log scale flips that problem and, more importantly, provides significant evidence against a common age slope (`r show_p(p_age_log)`). A common percent-per-year is too steep for smokers, who already sit on higher bills, so their log residuals fall with age. Putting a different age slope into the log equation removes the trend and makes the spreads unequal again (smoker-to-non-smoker residual SD ratio about `r round(scale_table$sd_ratio[4], 2)`). 
+
+The distribution of charges get closer to a straight normal plot on the log scale. The square root only partly cuts the skew. Once the equation is fit, the leftover residuals do not follow charges. Original scale and the square root leave almost the same right-skewed residual shape. The log lowers that skew and still leaves the upper tail: a cloud of non-smokers whose charges land in the smoker range. There is no data-error reason to delete these values. The largest Cook's distance is `r round(max_cook, 3)`, against a screen of \(4/n \approx `r round(cook_cut, 4)`\) that flags `r n_cook` rows at this sample size. `r n_tail` rows have a studentized residual beyond 3 in absolute value. They are almost all non-smokers. Nothing in the sample helps explain these special cases.
+
+The dollar intervals above use ordinary least-squares standard errors. Residual spread is not constant, and the upper tail is heavy, so those intervals are approximate. Using paired resampling matches the residual plot, which represents the unique variation specific to our sample. Smoker residual SD is about `r dollars(sd_yes)`. Non-smoker residual SD is about `r dollars(sd_no)`. 
+
+```{r fig-resid-dollar, fig.height=4.2}
+p_resid <- ggplot(
+  data.frame(
+    fitted = fitted(explain),
+    residual = resid(explain),
+    smoker = ins$smoker
+  ),
+  aes(x = fitted, y = residual, color = smoker)
+) +
+  geom_point(alpha = 0.35, size = 0.9) +
+  geom_hline(yintercept = 0, linewidth = 0.3) +
+  scale_color_manual(
+    values = smoker_colors,
+    labels = c("Non-smoker", "Smoker")
+  ) +
+  labs(
+    title = "Unexplained errors",
+    x = "Fitted charges ($)",
+    y = "Residual ($)",
+    color = NULL
+  )
+print(p_resid)
+ggsave("figures/residuals.png", p_resid, width = 8, height = 4.2, dpi = 160, bg = "white")
+```
+
+## Pricing the next customer
+
+Explaining an average difference and pricing one new customer are different jobs. For pricing, we compare it with more flexible fits and keep the method with the smallest typical (median) dollar miss.
+
+We use two checks to illustrate differences in bias and variance for each model. The repeated check fits on nine tenths of the customers and scores the tenth left out, then rotates, using the same ten groups every time. The held-out fifth is one 80/20 split: `r nrow(train)` customers to fit, `r nrow(valid)` to score once. When the two checks disagree, we follow the repeated check, since one split can move.
+
+The methods, in the order they were fit:
+
+- The explanation equation, fit on the training customers only when it is being scored.
+- Every product of two recorded fields. This is the complicated linear model, not including polynomial transformations.
+- A search starting from the full set of products and adds or drops one term at a time, scoring by Akaike information criterion (AIC). The search is repeated inside each tenth. Otherwise the customers being scored would have helped choose the terms.
+- A penalized (shrinking) version of the same full set of products. By shrinking each variables coefficient, the optimized model is selected. The penalty can set a coefficient to exactly zero. We keep the strongest penalty that stays within one standard error of the lowest cross-validated squared error.
+- Nearest neighbors on the raw fields, including sex, after centering and scaling. Without that scaling, distance would be mostly age and BMI, and the neighborhood would ignore smoking.
+- An average of trees. Each tree may use every field at a split.
+- A random forest. Each split may look at only some of the fields. The forest below uses `r forest_ntree` trees and `r forest_mtry` fields at a split.
+
+```{r compare-table}
+show_num <- function(x, digits) {
+  ifelse(
+    is.na(x),
+    "—",
+    formatC(round(x, digits), format = "f", big.mark = ",", digits = digits)
+  )
+}
+exec_table <- data.frame(
+  Model = compare$model,
+  "Adjusted R2" = show_num(compare$adj_r2, 3),
+  "CV ($)" = show_num(compare$cv_rmse, 0),
+  "80/20 ($)" = show_num(compare$valid_rmse, 0),
+  check.names = FALSE
+)
+exec_table
+```
+
+Adjusted \(R^2\) is an in-sample score for the three linear fits on `r nrow(train)`  customers. The last two columns rank using the median of each method. AIC, BIC, and the leave-one-out PRESS statistic for the linear fits are in the appendix.
+
+The picture below is used to illustrate a trade off between bias and variation. Using one customer: age `r age_hold`, one child, female, northeast, each colored line is the quote the method would predict. Gray points are real customers within five years of that age. A straight line that sits off the cloud is bias: the method cannot follow the shape. A line that jumps from one BMI to the next is variance: the quote is chasing this sample. Linear methods can tilt, and they can tilt differently for smokers, but they stay straight. Neighbors, averaged trees, and the forest are allowed to bend.
+
+```{r fig-quotes, fig.height=5.6, fig.width=10}
+print(p_shape)
+```
+
+For a non-smoker the lines sit in the lower cloud. They do not rise to the customers whose bills are far above that band. Nearest neighbors wiggle toward a few of those points and then fall back. The wiggle does not explain the band.
+
+For a smoker the straight lines keep climbing, past $60,000 at the top of the BMI range. The cloud does not. The forest, the neighbors, and the averaged trees step up around a BMI of 30 and then level off near the cloud. The straight line is biased high once BMI is high. The flexible lines follow the step. The neighbors still jump from one BMI to the next. The forest is the calmest of the lines that are allowed to bend.
+
+```{r fig-median, fig.height=5.2, fig.width=10}
+center_plot <- rbind(
+  data.frame(
+    model = center_by$model,
+    smoker_label = center_by$smoker_label,
+    kind = "Half of customers",
+    dollars = center_by$median_abs
+  ),
+  data.frame(
+    model = center_by$model,
+    smoker_label = center_by$smoker_label,
+    kind = "Average of the misses",
+    dollars = center_by$mean_abs
+  )
+)
+center_plot$model <- factor(center_plot$model, levels = model_levels)
+p_center <- ggplot(center_plot, aes(x = dollars, y = model, color = kind)) +
+  geom_line(aes(group = model), color = "#C5BEB4", linewidth = 1.1) +
+  geom_point(size = 2.8) +
+  facet_wrap(~smoker_label) +
+  scale_color_manual(values = c(
+    "Half of customers" = "#1B4F72",
+    "Average of the misses" = "#922B21"
+  )) +
+  scale_x_continuous(limits = c(0, NA)) +
+  labs(
+    title = "The average miss is pulled off the typical customer",
+    subtitle = "Same left-out customers. The line connects the median absolute miss to the mean.",
+    x = "Absolute miss ($)",
+    y = NULL,
+    color = NULL
+  ) +
+  theme(legend.position = "bottom")
+print(p_center)
+ggsave(
+  "figures/median_vs_mean.png",
+  p_center, width = 10, height = 5.2, dpi = 160, bg = "white"
+)
+```
+
+Half of smoker bills are within `r dollars(med_f_yes)` of the forest quote, and the average absolute miss for those smokers is `r dollars(mean_f_yes)`. Half of non-smoker bills are within `r dollars(med_f_no)`, and the average is `r dollars(mean_f_no)`. `r if (best_med == "Random forest") "Across all customers, the forest also has the smallest median miss." else paste0("Across all customers, the smallest median miss belongs to the ", tolower(best_med), ".")` `r if (best_med_yes == "Random forest") "Among smokers, the forest has the smallest median miss." else paste0("Among smokers, the smallest median miss belongs to the ", tolower(best_med_yes), ", at ", dollars(med_of(best_med_yes, "Smoker")), " against ", dollars(med_f_yes), " for the forest.")` `r if (best_med_no == "Random forest") "Among non-smokers, the forest has the smallest median miss." else paste0("Among non-smokers, the smallest median miss belongs to the ", tolower(best_med_no), ", at ", dollars(med_of(best_med_no, "Non-smoker")), " against ", dollars(med_f_no), " for the forest. That gap is ", dollars(med_f_no - med_of(best_med_no, "Non-smoker")), ", not a reason to keep a second scorer. The smoker gap against the equation is ", dollars(med_e_yes - med_f_yes), ".")`
+
+```{r fig-miss-hist, fig.height=5.2}
+miss_focus <- miss_long[
+  miss_long$model %in% c("Explanation equation", "Random forest"),
+]
+p_miss <- ggplot(miss_focus, aes(x = miss, fill = smoker_label)) +
+  geom_histogram(bins = 40, position = "identity", alpha = 0.55) +
+  geom_vline(xintercept = 0, linewidth = 0.3) +
+  facet_grid(model ~ smoker_label, scales = "free_y") +
+  scale_fill_manual(values = c("Non-smoker" = "#5C6B73", "Smoker" = "#9B2335")) +
+  guides(fill = "none") +
+  labs(
+    title = "Left-out error",
+    subtitle = "Charges minus quote. Zero is a perfect quote.",
+    x = "Error ($)",
+    y = "# of Customers"
+  )
+print(p_miss)
+ggsave("figures/miss_histogram.png", p_miss, width = 9, height = 5.2, dpi = 160, bg = "white")
+```
+
+```{r fig-error, fig.height=4.6}
+flex_order <- c(
+  "Explanation equation",
+  "Term search",
+  "Shrunk equation",
+  "All two-way products",
+  "Nearest neighbors",
+  "Averaged trees",
+  "Random forest"
+)
+flex <- rbind(
+  data.frame(
+    model = compare$model,
+    estimate = "Repeated check",
+    rmse = compare$cv_rmse,
+    stringsAsFactors = FALSE
+  ),
+  data.frame(
+    model = compare$model,
+    estimate = "Held-out fifth",
+    rmse = compare$valid_rmse,
+    stringsAsFactors = FALSE
+  )
+)
+flex$model <- factor(flex$model, levels = rev(flex_order))
+p_error <- ggplot(flex, aes(x = rmse, y = model, color = estimate)) +
+  geom_point(size = 2.8) +
+  scale_color_manual(values = c(
+    "Repeated check" = "#1F4E5F",
+    "Held-out fifth" = "#9B2335"
+  )) +
+  labs(
+    title = "Typical error",
+    x = "Median error ($)",
+    y = NULL,
+    color = NULL
+  )
+print(p_error)
+ggsave("figures/error_comparison.png", p_error, width = 8.5, height = 4.6, dpi = 160, bg = "white")
+```
+
+`r if (best_model == best_holdout) paste0("Both mean & median checks pick the ", tolower(best_model), ".") else paste0("The repeated check picks the ", tolower(best_model), ", and the held-out fifth picks the ", tolower(best_holdout), ". The call follows the repeated check.")`
+
+The full set of products has a repeated error of `r dollars(full_cv)`, against `r dollars(explain_cv)` for the explanation. Leaving every product in the equation does not help on either score.
+
+### What we would use
+
+Use the random forest to price a new customer. The lowest repeated-check miss is the `r tolower(best_model)`, at `r dollars(best_cv)`. The lowest held-out miss is the `r tolower(best_holdout)`, at `r dollars(compare$valid_rmse[compare$model == best_holdout])`. The two checks `r if (best_model == best_holdout) "agree." else "do not agree, so the call follows the repeated check."` The forest is only `r dollars(explain_cv - forest_cv_rmse)` below the explanation equation on the repeated check. That gap sits inside the fold-to-fold variation of about `r dollars(forest_cv_sd)`. The accuracy edge is small. The reason to score with the forest is that point estimate together with the residual plot: one error bar does not fit both groups.
+
+Keep the explanation equation for the meeting. A one-year age difference, the smoker difference at a stated BMI, and the regional level shifts are readable there. The paired ranges are what we would quote for the age amount and for the smoker gap at BMI 30. They are not readable from a forest or from a neighbor average.
+
+We would not put the linear equation into production as the scorer. The forest does not need the constant-spread assumption that the residual plot rejects. We also would not describe the forest as an explanation. It does not say how many dollars a year of age is worth.
+
+`r if (n_high > 0) paste0("On the held-out fifth, ", n_high, " non-smokers have charges above $15,000. The explanation equation misses that group by about ", dollars(mae_explain_high), " on average. The forest misses them by about ", dollars(mae_forest_high), ". A more flexible scorer does not explain those customers. They remain a limit of every method in this comparison.") else "The held-out fifth did not contain a separate band of high-charge non-smokers large enough to call out."`
+
+## Scope
+
+The file supports an association in these customers. It does not support a national rate, a causal effect, or a single error bar.
+
+The four regions are the four labels in the file. Generalizing past them is a guess. There is no household, plan, or year identifier, so we cannot check whether one customer's bill is tied to another. Independence is an assumption, not a result.
+
+Cause. Smoking, BMI, and region were not assigned. A smoker at BMI 30 costs about `r dollars(gaps$estimate[gaps$bmi == 30])` more in this file, holding age, children, and region fixed. That is not an estimate of what the bill would do if a particular customer stopped smoking.
+
+The forest's margin is `r dollars(forest_abs95_yes)` for smokers and `r dollars(forest_abs95_no)` for non-smokers, in the sense that 95% of left-out charges fell inside that distance of the quote. The explanation equation's own errors have a standard deviation of about `r dollars(sd_yes)` for smokers and `r dollars(sd_no)` for non-smokers, and those two spreads are not a pricing margin. 
+
+The unexplained band. High-charge non-smokers are still high-charge non-smokers after every method in this notebook. If we had more time, we would ask what the file does not contain: diagnosis, plan design, deductible, and whether the charge is one year or many. We would not add a method outside the ones compared here. We would also want a later book of customers, not another split of this one, before treating the forest's edge of about `r dollars(explain_cv - forest_cv_rmse)` as stable.
+
+Final recommendations: Explain with the dollar equation: age, children, a smoker gap that depends on BMI, and a regional level shift. Price with the random forest prediction model. Say the range on the two average effects with the paired resample, for a more narrow spread. A customer quits smoking or moved to the northeast from the southeast is not represented in either model. 
+
+## Appendix
+
+Squared left-out misses. Each customer's contribution to mean squared error is the square of (bill minus quote). The histograms are the technical view of the margin in the pricing section. The horizontal axis is millions of squared dollars, so a few large misses dominate the average. That is why the meeting quote is the 95% dollar margin, not the average of the squares.
+
+```{r fig-sq-hist, fig.height=7.2}
+p_sq <- ggplot(miss_long, aes(x = squared_miss / 1e6, fill = smoker_label)) +
+  geom_histogram(bins = 30, position = "identity", alpha = 0.55) +
+  facet_wrap(~model, scales = "free_y", ncol = 2) +
+  scale_fill_manual(values = c("Non-smoker" = "#5C6B73", "Smoker" = "#9B2335")) +
+  labs(
+    title = "Squared miss for each left-out customer",
+    subtitle = "These squares are what the mean squared error averages.",
+    x = "Squared miss (millions of dollars squared)",
+    y = "Customers",
+    fill = NULL
+  )
+print(p_sq)
+ggsave("figures/squared_miss_histogram.png", p_sq, width = 9, height = 7.2, dpi = 140, bg = "white")
+```
+
+Training scores for the three linear fits. PRESS is the sum of squared leave-one-out misses on the training customers. It is not a dollar root-mean-square error, and it is not compared with the forest.
+
+```{r appendix-scores}
+score_show <- data.frame(
+  Model = compare$model[1:3],
+  AIC = formatC(compare$AIC[1:3], format = "f", big.mark = ",", digits = 1),
+  BIC = formatC(compare$BIC[1:3], format = "f", big.mark = ",", digits = 1),
+  `Adjusted R2` = formatC(compare$adj_r2[1:3], format = "f", digits = 3),
+  PRESS = formatC(round(compare$PRESS[1:3]), format = "f", big.mark = ",", digits = 0),
+  `Repeated-check SD ($)` = formatC(round(compare$cv_sd[1:3]), format = "f", big.mark = ",", digits = 0),
+  check.names = FALSE
+)
+score_show
+```
+
+Spread of the explanation-equation misses. The ordinary range assumes one common normal spread. The residual bootstrap redraws from one pool and lines up with that assumption. The paired range does not. The paired range is the one that matches the residual plot.
+
+```{r appendix-spread}
+set.seed(1234)
+paired_sd_all <- numeric(1000)
+paired_sd_no <- numeric(1000)
+paired_sd_yes <- numeric(1000)
+for (b in 1:1000) {
+  rows <- sample.int(nrow(ins), replace = TRUE)
+  fit_b <- lm(explain_formula, data = ins[rows, ])
+  miss <- resid(fit_b)
+  smoker_b <- ins$smoker[rows]
+  paired_sd_all[b] <- sd(miss)
+  paired_sd_no[b] <- sd(miss[smoker_b == "no"])
+  paired_sd_yes[b] <- sd(miss[smoker_b == "yes"])
+}
+set.seed(1234)
+resid_sd_boot <- numeric(1000)
+for (b in 1:1000) {
+  resid_sd_boot[b] <- sd(sample(resid_all, replace = TRUE))
+}
+ord_all <- sigma_ci(resid_all)
+ord_no <- sigma_ci(resid_all[ins$smoker == "no"])
+ord_yes <- sigma_ci(resid_all[ins$smoker == "yes"])
+pair_all <- quantile(paired_sd_all, c(0.025, 0.975))
+pair_no <- quantile(paired_sd_no, c(0.025, 0.975))
+pair_yes <- quantile(paired_sd_yes, c(0.025, 0.975))
+resid_ci <- quantile(resid_sd_boot, c(0.025, 0.975))
+data.frame(
+  Spread = c("All misses", "Non-smokers", "Smokers"),
+  Estimate = dollars(c(sd_all, sd_no, sd_yes)),
+  `Ordinary range` = c(
+    range_words(ord_all[1], ord_all[2]),
+    range_words(ord_no[1], ord_no[2]),
+    range_words(ord_yes[1], ord_yes[2])
+  ),
+  `Paired resample` = c(
+    range_words(pair_all[1], pair_all[2]),
+    range_words(pair_no[1], pair_no[2]),
+    range_words(pair_yes[1], pair_yes[2])
+  ),
+  `Residual redraw` = c(
+    range_words(resid_ci[1], resid_ci[2]),
+    "—",
+    "—"
+  ),
+  check.names = FALSE
+)
+```
+
+```{r appendix-contrasts}
+data.frame(
+  Contrast = c("Age, one year", "Smoker gap at BMI 30"),
+  Estimate = dollars(c(
+    explain_coefs$estimate[explain_coefs$term == "age"],
+    gaps$estimate[gaps$bmi == 30]
+  )),
+  `Ordinary range` = c(
+    range_words(
+      explain_coefs$lcl[explain_coefs$term == "age"],
+      explain_coefs$ucl[explain_coefs$term == "age"]
+    ),
+    range_words(gaps$lcl[gaps$bmi == 30], gaps$ucl[gaps$bmi == 30])
+  ),
+  `Paired resample` = c(
+    range_words(age_paired[1], age_paired[2]),
+    range_words(gap_paired[1], gap_paired[2])
+  ),
+  `Residual redraw` = c(
+    range_words(age_resid_ci[1], age_resid_ci[2]),
+    range_words(gap_resid_ci[1], gap_resid_ci[2])
+  ),
+  check.names = FALSE
+)
+```
+
+```{r appendix-qq, fig.height=7.6}
+skewness <- function(x) mean((x - mean(x))^3) / sd(x)^3
+bill_qq <- data.frame(
+  scale = rep(c("Dollars", "Square root", "Log"), each = nrow(ins)),
+  value = c(ins$charges, sqrt(ins$charges), log(ins$charges)),
+  stringsAsFactors = FALSE
+)
+bill_qq$scale <- factor(bill_qq$scale, levels = c("Dollars", "Square root", "Log"))
+bill_sk <- tapply(bill_qq$value, bill_qq$scale, skewness)
+resid_sk <- tapply(mlr_resid$std_resid, mlr_resid$scale, skewness)
+skew_label <- function(sk) setNames(sprintf("%s, skew %.2f", names(sk), sk), names(sk))
+p_qq_bill <- ggplot(bill_qq, aes(sample = value)) +
+  stat_qq(alpha = 0.25, size = 0.55, color = "#1F4E5F") +
+  stat_qq_line(linewidth = 0.3) +
+  facet_wrap(~scale, scales = "free", labeller = as_labeller(skew_label(bill_sk))) +
+  labs(
+    title = "The bill, before any equation",
+    x = "Theoretical quantile",
+    y = "Sample quantile, on that scale"
+  )
+p_qq_resid <- ggplot(mlr_resid, aes(sample = std_resid)) +
+  stat_qq(alpha = 0.25, size = 0.55, color = "#9B2335") +
+  stat_qq_line(linewidth = 0.3) +
+  facet_wrap(~scale, labeller = as_labeller(skew_label(resid_sk))) +
+  labs(
+    title = "Standardized misses after the same equation",
+    subtitle = "These are on a common spread, so only a change in shape is visible. Square root barely moves. The log moves less than the raw bill.",
+    x = "Theoretical quantile",
+    y = "Sample quantile"
+  )
+grid.arrange(p_qq_bill, p_qq_resid, ncol = 1)
+```
+
+```{r appendix-cook, fig.height=3.4}
+p_cook <- ggplot(data.frame(i = seq_along(cooks), cook = cooks), aes(x = i, y = cook)) +
+  geom_point(size = 0.7, alpha = 0.5, color = "#1F4E5F") +
+  geom_hline(yintercept = cook_cut, linetype = 2) +
+  labs(
+    title = "No single customer dominates the explanation equation",
+    subtitle = "The dashed line is 4 divided by the number of customers. It is a screen, not a deletion rule.",
+    x = "Row in the analysis file",
+    y = "Cook's distance"
+  )
+print(p_cook)
+```
+
+```{r save-metrics, echo=FALSE}
+metric_names <- c(
+  "n_raw", "n", "n_dropped", "n_miss",
+  "mean_charges", "median_charges",
+  "n_yes", "n_no", "mean_yes", "mean_no", "median_yes", "median_no",
+  "r_bmi_yes", "r_bmi_no", "r_age_yes", "r_age_no",
+  "gap25", "gap30", "gap35",
+  "gap30_lcl", "gap30_ucl", "gap30_pair_lcl", "gap30_pair_ucl",
+  "age_est", "age_lcl", "age_ucl", "age_pair_lcl", "age_pair_ucl",
+  "child_est", "bmi_no", "bmi_yes",
+  "se_est", "sw_est", "nw_est",
+  "sd_yes", "sd_no", "sd_ratio",
+  "n_tail", "max_cook", "n_cook",
+  "n_train", "n_valid",
+  "explain_cv", "explain_hold", "explain_cv_sd",
+  "full_cv", "full_hold",
+  "step_cv", "step_hold", "step_n_terms", "explain_n_terms",
+  "lasso_cv", "lasso_hold", "n_keep", "n_start",
+  "knn_cv", "knn_hold", "k_chosen", "knn_k1", "knn_k30",
+  "bag_cv", "bag_hold",
+  "forest_cv", "forest_hold", "forest_cv_sd", "forest_mtry",
+  "n_high", "mae_explain_high", "mae_forest_high",
+  "production", "best_model", "best_holdout",
+  "p_sex", "p_smoker_region", "p_region", "p_bmi_smoker",
+  "se_smoker_mean", "ne_smoker_mean",
+  "adj_r2_explain"
+)
+metric_values <- c(
+  n_raw, n, n_dropped, n_miss,
+  mean_charges, median_charges,
+  n_yes, n_no, mean_yes, mean_no, median_yes, median_no,
+  r_bmi_yes, r_bmi_no, r_age_yes, r_age_no,
+  gaps$estimate[gaps$bmi == 25],
+  gaps$estimate[gaps$bmi == 30],
+  gaps$estimate[gaps$bmi == 35],
+  gaps$lcl[gaps$bmi == 30], gaps$ucl[gaps$bmi == 30],
+  gap_paired[1], gap_paired[2],
+  explain_coefs$estimate[explain_coefs$term == "age"],
+  explain_coefs$lcl[explain_coefs$term == "age"],
+  explain_coefs$ucl[explain_coefs$term == "age"],
+  age_paired[1], age_paired[2],
+  explain_coefs$estimate[explain_coefs$term == "children"],
+  slope_no$estimate, slope_yes$estimate,
+  explain_coefs$estimate[explain_coefs$term == "regionsoutheast"],
+  explain_coefs$estimate[explain_coefs$term == "regionsouthwest"],
+  explain_coefs$estimate[explain_coefs$term == "regionnorthwest"],
+  sd_yes, sd_no, sd_ratio_dollar,
+  n_tail, max_cook, n_cook,
+  nrow(train), nrow(valid),
+  explain_cv, explain_hold, explain_cv_sd,
+  full_cv, full_hold,
+  step_cv, step_hold, step_n_terms, explain_n_terms,
+  lasso_cv_rmse, lasso_hold, n_keep, n_start,
+  knn_cv_rmse, knn_hold, k_chosen, k_rmse(1), k_rmse(30),
+  bag_cv_rmse, bag_hold,
+  forest_cv_rmse, forest_hold, forest_cv_sd, forest_mtry,
+  n_high, mae_explain_high, mae_forest_high,
+  production, best_model, best_holdout,
+  tests$p_value[tests$comparison == "Add sex"],
+  tests$p_value[tests$comparison == "Let the smoker gap differ by region"],
+  tests$p_value[tests$comparison == "Add region as a level shift"],
+  tests$p_value[tests$comparison == "Let the BMI slope differ by smoker"],
+  region_smoker$mean_charges[region_smoker$region == "southeast" & region_smoker$smoker == "yes"],
+  region_smoker$mean_charges[region_smoker$region == "northeast" & region_smoker$smoker == "yes"],
+  summary(explain)$adj.r.squared
+)
+write.csv(
+  data.frame(name = metric_names, value = as.character(metric_values)),
+  "talk_numbers.csv",
+  row.names = FALSE
+)
+write.csv(compare, "talk_comparison.csv", row.names = FALSE)
+```
+
+### Model Fit Table
+
+We do not use a typical error divided by the average bill to chose a model. The useful cut of the average is a margin by smoking status: on the same left-out customers, how far from the quote 95% of bills landed. A positive number means the bill came in above the quote.
+
+```{r center-table}
+center_show <- center_by
+center_show$model <- as.character(center_show$model)
+center_show$median_abs <- dollars(center_show$median_abs)
+center_show$mean_abs <- dollars(center_show$mean_abs)
+center_show$rmse <- dollars(center_show$rmse)
+names(center_show) <- c(
+  "Method", "Group", "Half of customers within",
+  "Average absolute error", "Root-mean-square error"
+)
+center_show
+```
+
+```{r margin-table}
+margin_show <- margin_table
+margin_show$model <- as.character(margin_show$model)
+margin_show$abs95 <- dollars(margin_show$abs95)
+margin_show$band <- paste0(dollars(margin_table$q025), " to ", dollars(margin_table$q975))
+margin_show <- margin_show[, c("model", "smoker_label", "abs95", "band")]
+names(margin_show) <- c(
+  "Method",
+  "Group",
+  "95% of misses within",
+  "Middle 95% of misses (bill minus quote)"
+)
+margin_show
+```
+
+For the forest, 95% of smoker errors are within `r dollars(forest_abs95_yes)`, and 95% of non-smoker errors are within `r dollars(forest_abs95_no)`. The middle 95% runs from `r dollars(forest_q025_yes)` to `r dollars(forest_q975_yes)` for smokers and from `r dollars(forest_q025_no)` to `r dollars(forest_q975_no)` for non-smokers. The explanation equation's 95% margins are `r dollars(explain_abs95_yes)` for smokers and `r dollars(explain_abs95_no)` for non-smokers. The forest is not tighter on both. 
+
+The mean absolute error is larger than the median because that tail pulls it. Half the customers sit at the median. The average is the mean of the same absolute error Where the two separate, the average is describing the outliers.
+
+### Stepwise Regression
+
+The term search keeps `r step_n_terms` terms, against `r explain_n_terms` in the explanation equation and `r full_n_terms` in the full product model. `r if (step_kept_bmi) "The product of BMI and smoking status is still there." else "The product of BMI and smoking status was dropped."` `r if (step_kept_sex) "Sex, which the explanation left out, is in the searched equation." else "Sex is not in the searched equation."` Training AIC is `r formatC(step_scores$AIC, format = "f", big.mark = ",", digits = 1)`, which `r if (step_scores$AIC < explain_scores$AIC) "is better than the explanation equation, because that is the score the search was asked to optimize." else "does not beat the explanation equation."` The repeated-check miss is `r dollars(step_cv)`. AIC rewards the equation the search built. It does not answer whether a new customer is priced more accurately. The searched equation is not the explanation equation.
+
+### Penalized Regression 
+
+The shrunk equation keeps `r n_keep` of `r n_start` terms and has a repeated-check miss of `r dollars(lasso_cv_rmse)`. Shrinking the long equation does not beat the short one already chosen for explanation. The picture of that penalty is below. Farther right is a stronger penalty. The error barely changes between the penalty with the smallest squared error (`r n_at_min` terms) and the penalty we keep. Farther right, once only a few terms remain, the error climbs. The penalty has started to remove signal.
+
+```{r fig-penalty, fig.height=4.4}
+pen <- data.frame(
+  log_penalty = log(lasso_cv_fit$lambda),
+  mse = lasso_cv_fit$cvm,
+  se = lasso_cv_fit$cvsd,
+  nzero = lasso_cv_fit$nzero
+)
+p_pen <- ggplot(pen, aes(x = log_penalty, y = mse / 1e6)) +
+  geom_errorbar(
+    aes(ymin = (mse - se) / 1e6, ymax = (mse + se) / 1e6),
+    width = 0, color = "grey75"
+  ) +
+  geom_point(color = "#9B2335", size = 1.3) +
+  geom_vline(xintercept = log(lasso_cv_fit$lambda.min), linetype = 2) +
+  geom_vline(xintercept = log(lasso_cv_fit$lambda.1se), linetype = 2) +
+  labs(
+    title = "A stronger penalty does not buy a smaller dollar miss",
+    subtitle = "Left dotted line: smallest squared error. Right dotted line: the penalty we keep.",
+    x = "Log penalty. Right is stronger.",
+    y = "Cross-validated squared error (millions)"
+  )
+print(p_pen)
+ggsave("figures/penalty.png", p_pen, width = 8, height = 4.4, dpi = 160, bg = "white")
+```
+
+### kNN Details
+
+Nearest neighbors are more flexible than a straight line and, on this file, less accurate than the explanation equation. A neighborhood of 1 has a repeated-check miss of `r dollars(k_rmse(1))`. A neighborhood of 30 has `r dollars(k_rmse(30))`. The size the repeated check chose is \(k = `r k_chosen`\), with a miss of `r dollars(k_rmse(k_chosen))`. Copying the nearest customer is unstable. Averaging people who are not alike is stable and off. The chosen neighborhood did not pass the explanation equation. There is no coefficient list for this method. The price is an average of neighbors.
+
+```{r fig-knn, fig.height=4}
+k_plot <- knn_cv$results
+k_plot$choice <- ifelse(k_plot$k == k_chosen, "Chosen", "Tried")
+p_knn <- ggplot(k_plot, aes(x = k, y = RMSE)) +
+  geom_line(color = "#5C6B73") +
+  geom_point(aes(shape = choice), size = 2.4, color = "#1F4E5F") +
+  scale_shape_manual(values = c(Chosen = 16, Tried = 1)) +
+  labs(
+    title = "Neighbor size: too small is noisy, too large is biased",
+    x = "Number of neighbors",
+    y = "Repeated-check miss ($)",
+    shape = NULL
+  )
+print(p_knn)
+ggsave("figures/knn_k.png", p_knn, width = 8, height = 4, dpi = 160, bg = "white")
+```
+
+Averaged trees, which may use every field at a split, have a repeated-check miss of `r dollars(bag_cv_rmse)` and a held-out miss of `r dollars(bag_hold)`. `r if ((bag_cv_rmse > explain_cv) && (bag_hold < explain_hold)) "They beat the explanation equation on the one split and lose to it on the repeated check. That is why one split is not enough." else if ((bag_cv_rmse < explain_cv) && (bag_hold > explain_hold)) "They beat the explanation equation on the repeated check and lose to it on the one split. That is why one split is not enough." else "They are not the method we would ship."`
+
+The forest restricts each split to `r forest_mtry` fields. That restriction is why its miss is not the averaged-tree miss. More flexibility is not automatically better. The gain that does show up comes from a method that can change shape, not from a longer linear equation.
+
+The earlier notebooks remain the working papers: `EDA/Project1_Insurance_EDA.Rmd`, `Objective_1/Project1_Insurance_Objective1.Rmd`, and `Objective_2/Project1_Insurance_Objective2.Rmd`. This file is the one to submit with the slides. It does not change those fits. The explanation equation, the full product model, the penalty, the neighbor scaling, the forest, the split, and the seed are the ones already settled.
+
+

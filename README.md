@@ -38,9 +38,9 @@ Due **Sunday, 27 September 2026**. One person submits: slides, 20-minute recordi
 | 9 | **Obj 2 — nonparametric** | ✅ Complete | Scaled `caret` kNN and a `caret` random forest. 10-fold CV beside an 80/20 split, in dollars |
 | 10 | **Obj 2 — extra course models** | ✅ Complete | Lasso (`glmnet`), bagged trees, and bootstrap of the Objective 1 equation. Same folds as steps 8–9 |
 | 11 | **Obj 2 — comparison table** | ✅ Complete | One table: AIC, BIC, adjusted \(R^2\), PRESS where defined, plus 10-fold and 80/20 RMSE in dollars. Random forest is the lowest-error predictor |
-| 12 | **Final remarks** | ⬜ Not started | Scope of inference (four US regions, not a national sample); limits; if we had more time |
-| 13 | **Slides + 20-min talk** | ⬜ Not started | Intro 10 / EDA 20 / Obj 1 20 / Obj 2 20 / close 10. Both present. Isolate output; do not let plots talk |
-| 14 | **Knit notebook + appendix** | ⬜ Not started | HTML matches slides; extra tables in appendix or Rmd |
+| 12 | **Final remarks** | ✅ Complete | In the executive summary: four regions in this file, not a national sample; not causal; high-charge non-smokers unexplained |
+| 13 | **Slides + 20-min talk** | Slides drafted | `Executive_Summary/Project1_Insurance_Presentation.pptx`. Video not recorded. Both present |
+| 14 | **Knit notebook + appendix** | ✅ Complete | `Executive_Summary/Project1_Insurance_Executive_Summary.Rmd` and the knitted HTML. Working papers in `EDA/`, `Objective_1/`, and `Objective_2/` stay |
 | 15 | **Peer review (Canvas)** | ⬜ Not started | Individual; not in this repo |
 
 Prompt floor for Objective 2 is **three** models in the table (Obj 1 MLR, complex MLR, one nonparametric). Extra models are fine; skipping the complex MLR or the nonparametric is not.
@@ -54,7 +54,7 @@ Raw file \(n=1338\), one exact duplicate dropped (19-year-old northwest male, no
 - **Region × smoker** — the “depend on region?” question; Southeast smokers highest; region is mostly a level shift
 - Age slopes in both smoker groups; `log(charges)` is nearly symmetric if diagnostics force a transform
 
-Next: finish step 6 (diagnostics) and step 7 (the prompt answer), then slides and the talk. The Objective 1 notebook is `Objective_1/Project1_Insurance_Objective1.Rmd`. The Objective 2 notebook is `Objective_2/Project1_Insurance_Objective2.Rmd`. Not more EDA.
+The submission brief is `Executive_Summary/Project1_Insurance_Executive_Summary.Rmd` (knitted HTML beside it). The slides are `Executive_Summary/Project1_Insurance_Presentation.pptx`. The earlier notebooks stay as the working papers. Next is the video. Not more EDA.
 
 ## Repository Structure
 
@@ -73,20 +73,25 @@ Next: finish step 6 (diagnostics) and step 7 (the prompt answer), then slides an
 ├── Objective_2/
 │   ├── Project1_Insurance_Objective2.Rmd
 │   └── Project1_Insurance_Objective2.html
+├── Executive_Summary/
+│   ├── Project1_Insurance_Executive_Summary.Rmd
+│   ├── Project1_Insurance_Executive_Summary.html
+│   └── Project1_Insurance_Presentation.pptx
 ├── README.md
 └── 6372-Project1-Insurance.Rproj
 ```
 
-Knit working directory is the **document** folder. From `EDA/`, `Objective_1/`, or `Objective_2/`, data is read as `../data/insurance.csv`.
+Knit working directory is the **document** folder. From `EDA/`, `Objective_1/`, `Objective_2/`, or `Executive_Summary/`, data is read as `../data/insurance.csv`.
 
 ## How to Reproduce
 
 1. Open `6372-Project1-Insurance.Rproj` in RStudio.
 2. Knit `EDA/Project1_Insurance_EDA.Rmd` (packages: `ggplot2`, `dplyr`, `tidyr`, `GGally`, `naniar`, `gridExtra`).
 3. Knit `Objective_1/Project1_Insurance_Objective1.Rmd` and `Objective_2/Project1_Insurance_Objective2.Rmd`. Objective 2 also uses `caret`, `glmnet`, and `lmboot`.
-4. Branch for a slice of work (`obj1-slr-mlr`, `obj2-compare`, `slides`).
-5. Knit the `.Rmd` before you push so the HTML matches.
-6. Do not commit `.RData`, Office lockfiles (`~$*`), or knitted `*_files/` folders.
+4. Knit `Executive_Summary/Project1_Insurance_Executive_Summary.Rmd` for the submission brief. The slides read the figures and dollar amounts from that knit.
+5. Branch for a slice of work (`obj1-slr-mlr`, `obj2-compare`, `slides`).
+6. Knit the `.Rmd` before you push so the HTML matches.
+7. Do not commit `.RData`, Office lockfiles (`~$*`), or knitted `*_files/` folders.
 
 To add the second GitHub user as a collaborator, send Aaron the GitHub username. The repo is **private**.
 
