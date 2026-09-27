@@ -1335,48 +1335,74 @@ print(p_miss)
 ggsave("figures/miss_histogram.png", p_miss, width = 9, height = 5.2, dpi = 160, bg = "white")
 ```
 
-```{r fig-error, fig.height=4.6}
-flex_order <- c(
-  "Explanation equation",
-  "Term search",
-  "Shrunk equation",
-  "All two-way products",
-  "Nearest neighbors",
-  "Averaged trees",
-  "Random forest"
+```{r fig-error, fig.width=10, fig.height=5.2}
+hold_frame <- data.frame(
+  smoker_label = ifelse(valid$smoker == "yes", "Smoker", "Non-smoker"),
+  charges = valid$charges,
+  stringsAsFactors = FALSE
+)
+hold_frame[["Explanation equation"]] <- as.numeric(predict(explain_fit, newdata = valid))
+hold_frame[["All two-way products"]] <- as.numeric(predict(full_fit, newdata = valid))
+hold_frame[["Term search"]] <- as.numeric(predict(step_fit, newdata = valid))
+hold_frame[["Shrunk equation"]] <- lasso_pred
+hold_frame[["Nearest neighbors"]] <- as.numeric(predict(knn_hold_fit, newdata = valid))
+hold_frame[["Averaged trees"]] <- as.numeric(predict(bag_hold_fit, newdata = valid))
+hold_frame[["Random forest"]] <- as.numeric(predict(forest_hold_fit, newdata = valid))
+hold_long <- pivot_longer(
+  hold_frame,
+  cols = all_of(model_levels),
+  names_to = "model",
+  values_to = "quoted"
+)
+hold_by <- hold_long %>%
+  group_by(model, smoker_label) %>%
+  summarise(rmse = sqrt(mean((charges - quoted)^2)), .groups = "drop")
+hold_by$estimate <- "Holdout"
+cv_by <- data.frame(
+  model = as.character(center_by$model),
+  smoker_label = as.character(center_by$smoker_label),
+  rmse = center_by$rmse,
+  estimate = "10-fold CV",
+  stringsAsFactors = FALSE
 )
 flex <- rbind(
-  data.frame(
-    model = compare$model,
-    estimate = "Repeated check",
-    rmse = compare$cv_rmse,
-    stringsAsFactors = FALSE
-  ),
-  data.frame(
-    model = compare$model,
-    estimate = "Held-out fifth",
-    rmse = compare$valid_rmse,
-    stringsAsFactors = FALSE
-  )
+  cv_by[, c("model", "smoker_label", "rmse", "estimate")],
+  hold_by[, c("model", "smoker_label", "rmse", "estimate")]
 )
-flex$model <- factor(flex$model, levels = rev(flex_order))
+flex$model <- factor(flex$model, levels = model_levels)
+flex$smoker_label <- factor(flex$smoker_label, levels = c("Non-smoker", "Smoker"))
+flex$estimate <- factor(flex$estimate, levels = c("10-fold CV", "Holdout"))
+cv_rmse_f_yes <- flex$rmse[flex$model == "Random forest" & flex$smoker_label == "Smoker" & flex$estimate == "10-fold CV"]
+cv_rmse_f_no <- flex$rmse[flex$model == "Random forest" & flex$smoker_label == "Non-smoker" & flex$estimate == "10-fold CV"]
+cv_rmse_e_yes <- flex$rmse[flex$model == "Explanation equation" & flex$smoker_label == "Smoker" & flex$estimate == "10-fold CV"]
+cv_rmse_e_no <- flex$rmse[flex$model == "Explanation equation" & flex$smoker_label == "Non-smoker" & flex$estimate == "10-fold CV"]
 p_error <- ggplot(flex, aes(x = rmse, y = model, color = estimate)) +
+  geom_line(aes(group = model), color = "#C5BEB4", linewidth = 1.1) +
   geom_point(size = 2.8) +
+  facet_wrap(~smoker_label) +
   scale_color_manual(values = c(
-    "Repeated check" = "#1F4E5F",
-    "Held-out fifth" = "#9B2335"
+    "10-fold CV" = "#1F4E5F",
+    "Holdout" = "#9B2335"
   )) +
+  scale_x_continuous(limits = c(0, NA)) +
   labs(
-    title = "Typical error",
-    x = "Median error ($)",
+    title = "Root-mean-square error, split by smoking status",
+    subtitle = "Each line connects the 10-fold CV error to the holdout.",
+    x = "RMSE ($)",
     y = NULL,
     color = NULL
-  )
+  ) +
+  theme(legend.position = "bottom")
 print(p_error)
-ggsave("figures/error_comparison.png", p_error, width = 8.5, height = 4.6, dpi = 160, bg = "white")
+ggsave(
+  "figures/error_comparison.png",
+  p_error, width = 10, height = 5.2, dpi = 160, bg = "white"
+)
 ```
 
-`r if (best_model == best_holdout) paste0("Both mean & median checks pick the ", tolower(best_model), ".") else paste0("The repeated check picks the ", tolower(best_model), ", and the held-out fifth picks the ", tolower(best_holdout), ". The call follows the repeated check.")`
+Among smokers, the forest's 10-fold root-mean-square error is `r dollars(cv_rmse_f_yes)` and the equation's is `r dollars(cv_rmse_e_yes)`. Among non-smokers the equation is `r dollars(cv_rmse_e_no)` and the forest is `r dollars(cv_rmse_f_no)`.
+
+`r if (best_model == best_holdout) paste0("Both checks still pick the ", tolower(best_model), " overall.") else paste0("The 10-fold check picks the ", tolower(best_model), " overall, and the holdout picks the ", tolower(best_holdout), ". The call follows the 10-fold check.")`
 
 The full set of products has a repeated error of `r dollars(full_cv)`, against `r dollars(explain_cv)` for the explanation. Leaving every product in the equation does not help on either score.
 
